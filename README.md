@@ -96,11 +96,13 @@ Generic (any type):
 class. `SCAN` starts with cursor `0`; keep passing back the `CURSOR`
 value from each reply until it comes back `0` again, which means the
 whole keyspace has been covered (matching Redis's own convention).
-`COUNT` (default 10) is a batch-size hint, not an exact cap - a whole
-hashtable bucket is always returned, so a call can return more than
-`COUNT` keys. The cursor is a raw hashtable bucket index, so - unlike
-Redis - many inserts happening between two `SCAN` calls can cause a
-key to be skipped or repeated; fine for interactive/dev use.
+`COUNT` (default 10) is how many keys each call examines; `MATCH` is
+applied after that, so a call can return fewer than `COUNT` keys (even
+none) while the cursor is still non-zero - keep iterating until it is
+`0`. The cursor is a position in a sorted snapshot of the live
+keyspace, taken fresh on each call, so - unlike Redis - inserts or
+deletes between two `SCAN` calls can cause a key to be skipped or
+repeated; fine for interactive/dev use.
 
 String:
 
