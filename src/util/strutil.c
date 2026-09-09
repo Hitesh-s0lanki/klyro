@@ -1,6 +1,7 @@
 /* strutil.c - small line-parsing helpers */
 #include "strutil.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,9 +39,11 @@ bool parse_int(const char *s, int *out) {
 
 bool parse_long(const char *s, long *out) {
   if (*s == '\0') return false;
+  errno = 0;
   char *end;
   long v = strtol(s, &end, 10);
   if (*end != '\0') return false;
+  if (errno == ERANGE) return false; /* out of range for `long` */
   *out = v;
   return true;
 }

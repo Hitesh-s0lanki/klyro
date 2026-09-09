@@ -29,6 +29,7 @@ reference.
 | [src/types/zset.h](../src/types/zset.h) / [src/types/zset.c](../src/types/zset.c) | Sorted Set data type: a sorted array of (member, score), ordered by (score, member); O(n) lookup/range — simpler than Redis's skip list, adequate at this project's scale. |
 | [src/util/htable.h](../src/util/htable.h) / [src/util/htable.c](../src/util/htable.c) | Shared string-keyed chaining hashtable (FNV-1a, resizes on load factor) — the building block behind the keyspace and behind Hash/Set. Lives in `util/`, not `types/`, since `store.c` also depends on it directly. |
 | [src/util/strutil.h](../src/util/strutil.h) / [src/util/strutil.c](../src/util/strutil.c) | `trim`/`next_token`/`parse_int`/`parse_long`/`parse_double` - line-parsing helpers shared by `commands.c` (network protocol) and `persist.c` (dump file), both of which parse simple whitespace-delimited text lines. |
+| [src/util/glob.h](../src/util/glob.h) / [src/util/glob.c](../src/util/glob.c) | Redis-style glob matching (`*`, `?`, `[...]`, `\` escapes) - used by `KEYS`/`SCAN`'s optional pattern. Pure string matching, no knowledge of the keyspace. |
 | [src/persist.h](../src/persist.h) / [src/persist.c](../src/persist.c) | Saves/loads the whole keyspace to a dump file: walks `store_foreach_entry`, writing a text record per key (plus `EXPIREAT` for keys with a TTL); on load, rebuilds the store and re-applies expiry as an absolute deadline so downtime is accounted for. Also owns the periodic autosave check (`persist_tick`, called from `commands_tick`). |
 | [Makefile](../Makefile) | Builds `klyro` from every `.c` file under `src/` and `src/*/` (via `wildcard`), compiling with `-Isrc` so every file can use root-relative includes like `"types/list.h"` — dropping in a new module or subdirectory needs no Makefile edit. |
 | [.gitignore](../.gitignore) | Standard C build-artifact ignores (`*.o`, `*.exe`, `*.dylib`, etc.), from upstream. |
@@ -104,6 +105,65 @@ from `main.c`, etc. — the Makefile picks up any new `.c` file under
   (e.g. `list.c` including its own `list.h`) were left unprefixed.
   Re-ran the full scripted regression suite (types, WRONGTYPE,
   multi-value, persistence round-trip) after the move — unchanged.
+- Added an automated test suite (see [roadmap.md](roadmap.md) - this
+  was gap #1 on the list): [tests/klyro_helper.py](../tests/klyro_helper.py)
+  spawns a real `klyro` subprocess and speaks its protocol; 52
+  `unittest` tests across `test_generic.py`/`test_types.py`/
+  `test_multi.py`/`test_persistence.py` replace the ad-hoc scripts used
+  throughout development. Wired into `make test` (builds first). Along
+  the way, fixed a bug in the test helper itself: it was unconditionally
+  deleting the dump file on every `KlyroServer()` construction, even
+  when a caller passed an existing path specifically to reload it (the
+  reload-after-restart test case) - now only auto-generated paths get
+  cleared. Also confirmed the readiness-polling connect loop in the
+  helper eliminates the "connection refused" race that showed up
+  repeatedly during manual `nc`/ad-hoc-script testing earlier in this
+  project's history (a single fixed `sleep` before connecting wasn't
+  reliably long enough).
+- Added string/numeric ergonomics (gap #2 on the roadmap): `INCR`/
+  `DECR`/`APPEND`/`GETRANGE`/`SETRANGE` in `commands.c`. Added
+  `store_update_string` alongside the existing `store_set_string` -
+  the new commands mutate a string in place and must preserve any
+  existing `EXPIRE`, unlike `SET` which always clears it (`store.c`'s
+  one-line difference is `expire_at` left untouched vs. reset to 0).
+  Hardened `strutil.c`'s `parse_long` to check `errno` for `ERANGE`
+  (needed for correct `INCR`/`DECR` overflow detection at the `long`
+  boundary - it previously accepted an out-of-range number silently
+  clamped by `strtol`). Added 16 new tests to `test_types.py` covering
+  all five commands, TTL preservation, and WRONGTYPE.
+- While building `GETRANGE` (which can return large substrings),
+  found and fixed a latent bug in `server.c`'s `conn_reply`: its
+  `vsnprintf` call used a fixed 1024-byte stack buffer, but
+  `vsnprintf`'s return value is the length it *would* need, which can
+  exceed the buffer it was given — so any reply over ~1KB (already
+  reachable via plain `GET` on a large `SET` value, before this task
+  even started) triggered `wbuf_append(conn, buf, n)` with `n` larger
+  than the actual valid data in `buf`, reading past the end of that
+  stack array. Fixed with the standard two-call `vsnprintf` pattern: a
+  256-byte fast-path stack buffer for ordinary short replies, falling
+  back to a precisely-sized heap buffer (sized from the first call's
+  return value) for anything larger. Verified with a 5000-byte value
+  round-tripped through `SET`/`GET`/`GETRANGE`.
+- Added key pattern matching (gap #3 on the roadmap): `KEYS pattern`
+  (bare `KEYS` still lists everything, unchanged) and `SCAN cursor
+  [MATCH pattern] [COUNT count]`. New module `util/glob.c` implements
+  Redis-style glob matching (`*`/`?`/`[...]`/`\`) as pure string
+  matching with no keyspace knowledge, shared by both commands via a
+  `KeyFilterCtx` + `emit_key_if_match` helper in `commands.c`. `SCAN`'s
+  resumability is implemented as a new `htable_scan` in `util/htable.c`
+  (visits whole buckets starting at a given index, stopping once a
+  `COUNT`-ish number of nodes have been visited, returning the bucket
+  to resume from) wrapped by a new `store_scan` in `store.c` that
+  reuses the existing expiry-skipping callback from
+  `store_foreach_key`. The cursor is a raw bucket index — simpler than
+  Redis's reverse-binary-iteration cursor, at the cost of the same
+  resize-during-scan edge case Redis's algorithm exists to avoid (see
+  the doc comments on `htable_scan`/`store_scan` and the README's
+  `SCAN` note). Verified: a full SCAN loop with `COUNT 2` against 6
+  keys took 3 rounds and covered every key exactly once, matching a
+  plain `KEYS *`; 17 new tests in `test_scan.py` cover glob patterns
+  (prefix/suffix/`?`/classes/negation), the resumable loop, `MATCH`+
+  `COUNT` together, and usage-error cases.
 
 ## Notes / observations
 

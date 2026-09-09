@@ -105,3 +105,19 @@ void htable_foreach(HTable *t, HTableEachFn fn, void *userdata) {
     }
   }
 }
+
+size_t htable_scan(HTable *t, size_t start_bucket, size_t min_count, HTableEachFn fn,
+                    void *userdata) {
+  size_t visited = 0;
+  for (size_t i = start_bucket; i < t->nbuckets; i++) {
+    for (HNode *n = t->buckets[i]; n; n = n->next) {
+      fn(n, userdata);
+      visited++;
+    }
+    if (min_count > 0 && visited >= min_count) {
+      size_t next = i + 1;
+      return next >= t->nbuckets ? 0 : next;
+    }
+  }
+  return 0;
+}

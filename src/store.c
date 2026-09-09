@@ -183,6 +183,11 @@ void store_foreach_key(StoreEachFn fn, void *userdata) {
   htable_foreach(&keyspace, foreach_key_cb, &ctx);
 }
 
+size_t store_scan(size_t start_cursor, size_t min_count, StoreEachFn fn, void *userdata) {
+  ForeachCtx ctx = {fn, userdata};
+  return htable_scan(&keyspace, start_cursor, min_count, foreach_key_cb, &ctx);
+}
+
 typedef struct {
   StoreEachEntryFn fn;
   void *userdata;
@@ -213,6 +218,22 @@ void store_set_string(const char *key, const char *value) {
   }
 
   e = entry_new(STORE_STRING);
+  e->value.str = strdup(value);
+  htable_insert(&keyspace, key, e);
+}
+
+void store_update_string(const char *key, const char *value) {
+  dirty++;
+  Entry *e = store_find(key);
+  if (e) {
+    /* Callers are expected to have checked the type already (via
+     * check_type in commands.c); an existing entry here is a STRING. */
+    free(e->value.str);
+    e->value.str = strdup(value);
+    return; /* expire_at intentionally left as-is, unlike store_set_string */
+  }
+
+  e = entry_new(STORE_STRING); /* expire_at defaults to 0 (no expiry) */
   e->value.str = strdup(value);
   htable_insert(&keyspace, key, e);
 }

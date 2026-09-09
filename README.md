@@ -13,6 +13,19 @@ https://www.youtube.com/watch?v=FFxEoQyNQKM) and grown from there.
 make
 ```
 
+## Test
+
+```sh
+make test
+```
+
+Runs the integration suite under [tests/](tests/) (Python 3, stdlib
+only - no dependencies to install): spawns real `klyro` server
+subprocesses, talks to them over the actual TCP protocol, and checks
+every command, WRONGTYPE errors, multi-value push/add, and a full
+persistence round-trip (save, kill, reload). `make test` builds first,
+so a plain `make test` from a clean checkout is enough.
+
 ## Run
 
 ```sh
@@ -54,11 +67,23 @@ Generic (any type):
 | `EXPIRE key seconds` | `OK` or `NOT_FOUND` |
 | `TTL key` | `TTL <seconds>` (`-1` = no expiry, `-2` = missing) |
 | `TYPE key` | `STRING`/`LIST`/`HASH`/`SET`/`ZSET`, or `NONE` if missing |
-| `KEYS` | one key per line, terminated by `END` |
+| `KEYS [pattern]` | one matching key per line, terminated by `END` (no pattern = every key) |
+| `SCAN cursor [MATCH pattern] [COUNT count]` | matching keys, then a final `CURSOR <n>` line |
 | `DBSIZE` | `COUNT <n>` |
 | `SAVE` | `OK` (writes the dump file immediately) |
 | `QUIT` | `BYE`, then closes the connection |
 | `SHUTDOWN` | `SHUTTING_DOWN`, then stops the server (saving first) |
+
+`KEYS`/`SCAN`'s `pattern` is a glob: `*` matches any run of characters,
+`?` matches exactly one, `[abc]`/`[a-z]`/`[^abc]` match a character
+class. `SCAN` starts with cursor `0`; keep passing back the `CURSOR`
+value from each reply until it comes back `0` again, which means the
+whole keyspace has been covered (matching Redis's own convention).
+`COUNT` (default 10) is a batch-size hint, not an exact cap - a whole
+hashtable bucket is always returned, so a call can return more than
+`COUNT` keys. The cursor is a raw hashtable bucket index, so - unlike
+Redis - many inserts happening between two `SCAN` calls can cause a
+key to be skipped or repeated; fine for interactive/dev use.
 
 String:
 
@@ -66,6 +91,13 @@ String:
 |---|---|
 | `SET key value` | `OK` (value is the rest of the line — may contain spaces) |
 | `GET key` | `VALUE <value>` or `NOT_FOUND` |
+| `INCR key` / `DECR key` | `VALUE <n>` (missing key starts at 0; errors if the current value isn't an integer) |
+| `APPEND key value` | `LEN <n>` (new total length; creates the key if missing) |
+| `GETRANGE key start end` | `VALUE <substring>` (inclusive range; negative indices count from the end; out-of-range is an empty value, not an error) |
+| `SETRANGE key offset value` | `LEN <n>` (new total length; pads any gap before `offset` with spaces) |
+
+`INCR`/`DECR`/`APPEND`/`SETRANGE` mutate a string in place and preserve
+any existing `EXPIRE` — unlike `SET`, which always clears it.
 
 List (ordered values):
 
@@ -140,6 +172,14 @@ src/
   util/          - generic infrastructure with no keyspace/protocol knowledge
     htable.h/.c  -   shared string-keyed hashtable (used by store/hash/set)
     strutil.h/.c -   shared line-parsing helpers (used by commands + persist)
+    glob.h/.c    -   glob pattern matching (used by KEYS/SCAN)
+
+tests/           - the integration suite (see "Test" above)
+  klyro_helper.py -  starts/stops a klyro subprocess, speaks its protocol
+  test_generic.py -  PING/DEL/EXPIRE/TTL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN
+  test_types.py   -  String/List/Hash/Set/Zset ops, WRONGTYPE, empty-delete
+  test_multi.py   -  multi-value LPUSH/RPUSH/SADD/ZADD
+  test_persistence.py - save/kill/reload round-trip, TTL across a restart
 ```
 
 Each concern lives in its own module so new features can be added as new
@@ -181,3 +221,9 @@ the real path), so a crash mid-save can't corrupt the existing dump.
 - Persistence is a full-keyspace snapshot (like Redis's RDB), not an
   append-only log — a `SIGKILL`/crash loses everything since the last
   save (on a normal exit, at most ~60s of changes).
+- `SETRANGE` pads gaps with ASCII spaces, not zero bytes like Redis —
+  values are plain null-terminated C strings internally, which can't
+  represent an embedded `\0` byte anyway.
+- `INCR`/`DECR`/`APPEND`/`SETRANGE` cap the resulting string at 64 KiB
+  and reply with an `ERR` past that, to keep a single `APPEND`/`SETRANGE`
+  loop from growing a value without bound.

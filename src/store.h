@@ -41,6 +41,10 @@ void store_sweep_expired(void);
 typedef void (*StoreEachFn)(const char *key, void *userdata);
 void store_foreach_key(StoreEachFn fn, void *userdata);
 
+/* Resumable key iteration for the SCAN command - see htable_scan's doc
+ * comment for the cursor convention and its caveats. */
+size_t store_scan(size_t start_cursor, size_t min_count, StoreEachFn fn, void *userdata);
+
 typedef void (*StoreEachEntryFn)(const char *key, StoreType type, void *userdata);
 /* Like store_foreach_key, but also passes each entry's type - the hook
  * persistence uses to dump the whole keyspace. */
@@ -52,8 +56,11 @@ void store_foreach_entry(StoreEachEntryFn fn, void *userdata);
 size_t store_dirty_count(void);
 void store_reset_dirty(void);
 
-/* String type. */
+/* String type. store_set_string clears any existing expiry, matching
+ * Redis's SET; store_update_string keeps it, matching Redis's
+ * INCR/DECR/APPEND/SETRANGE (an in-place mutation, not a fresh SET). */
 void store_set_string(const char *key, const char *value);
+void store_update_string(const char *key, const char *value);
 const char *store_get_string(const char *key); /* NULL if missing or wrong type */
 
 /* Collection types. "get_or_create" makes a new empty collection if the

@@ -6,9 +6,12 @@
 #include "types/list.h"
 #include "types/set.h"
 #include "types/zset.h"
+#include "util/glob.h"
 #include "util/strutil.h"
 
+#include <limits.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -16,6 +19,7 @@
 
 #define SWEEP_INTERVAL_SEC 1
 #define MAX_ZADD_PAIRS 128
+#define MAX_STRING_LEN (64 * 1024) /* matches the network protocol's line-length cap */
 
 void commands_init(void) {
   store_init();
@@ -49,6 +53,18 @@ static bool check_type(Conn *conn, const char *key, StoreType want) {
 
 static void append_line(const char *item, void *userdata) {
   conn_reply((Conn *)userdata, "%s\r\n", item);
+}
+
+typedef struct {
+  Conn *conn;
+  const char *pattern; /* NULL = match every key, used by KEYS and SCAN */
+} KeyFilterCtx;
+
+static void emit_key_if_match(const char *key, void *userdata) {
+  KeyFilterCtx *ctx = userdata;
+  if (!ctx->pattern || glob_match(ctx->pattern, key)) {
+    conn_reply(ctx->conn, "%s\r\n", key);
+  }
 }
 
 static void append_field_value_lines(const char *field, const char *value, void *userdata) {
@@ -99,8 +115,43 @@ void commands_dispatch(Conn *conn, char *line) {
     conn_reply(conn, "%s\r\n", names[t]);
 
   } else if (strcasecmp(cmd, "KEYS") == 0) {
-    store_foreach_key(append_line, conn);
+    char *pattern = trim(rest); /* empty = every key, matching prior behavior */
+    KeyFilterCtx ctx = {conn, *pattern ? pattern : NULL};
+    store_foreach_key(emit_key_if_match, &ctx);
     conn_reply(conn, "END\r\n");
+
+  } else if (strcasecmp(cmd, "SCAN") == 0) {
+    char *cursor_str = next_token(&rest);
+    long cursor;
+    if (!cursor_str || !parse_long(cursor_str, &cursor) || cursor < 0) {
+      conn_reply(conn, "ERR usage: SCAN cursor [MATCH pattern] [COUNT count]\r\n");
+      return;
+    }
+
+    const char *pattern = NULL;
+    long count = 10;
+    for (char *opt = next_token(&rest); opt; opt = next_token(&rest)) {
+      if (strcasecmp(opt, "MATCH") == 0) {
+        pattern = next_token(&rest);
+        if (!pattern) {
+          conn_reply(conn, "ERR usage: SCAN cursor [MATCH pattern] [COUNT count]\r\n");
+          return;
+        }
+      } else if (strcasecmp(opt, "COUNT") == 0) {
+        char *count_str = next_token(&rest);
+        if (!count_str || !parse_long(count_str, &count) || count <= 0) {
+          conn_reply(conn, "ERR usage: SCAN cursor [MATCH pattern] [COUNT count]\r\n");
+          return;
+        }
+      } else {
+        conn_reply(conn, "ERR usage: SCAN cursor [MATCH pattern] [COUNT count]\r\n");
+        return;
+      }
+    }
+
+    KeyFilterCtx ctx = {conn, pattern};
+    size_t next_cursor = store_scan((size_t)cursor, (size_t)count, emit_key_if_match, &ctx);
+    conn_reply(conn, "CURSOR %zu\r\n", next_cursor);
 
   } else if (strcasecmp(cmd, "DBSIZE") == 0) {
     conn_reply(conn, "COUNT %zu\r\n", store_size());
@@ -124,6 +175,106 @@ void commands_dispatch(Conn *conn, char *line) {
     const char *value = store_get_string(key);
     if (value) conn_reply(conn, "VALUE %s\r\n", value);
     else conn_reply(conn, "NOT_FOUND\r\n");
+
+  } else if (strcasecmp(cmd, "INCR") == 0 || strcasecmp(cmd, "DECR") == 0) {
+    char *key = trim(rest);
+    if (*key == '\0') {
+      conn_reply(conn, "ERR usage: %s key\r\n", cmd);
+      return;
+    }
+    if (!check_type(conn, key, STORE_STRING)) return;
+    const char *current = store_get_string(key);
+    long value = 0;
+    if (current && !parse_long(current, &value)) {
+      conn_reply(conn, "ERR value is not an integer\r\n");
+      return;
+    }
+    bool incr = strcasecmp(cmd, "INCR") == 0;
+    if ((incr && value == LONG_MAX) || (!incr && value == LONG_MIN)) {
+      conn_reply(conn, "ERR increment or decrement would overflow\r\n");
+      return;
+    }
+    value += incr ? 1 : -1;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%ld", value);
+    store_update_string(key, buf);
+    conn_reply(conn, "VALUE %ld\r\n", value);
+
+  } else if (strcasecmp(cmd, "APPEND") == 0) {
+    char *key = next_token(&rest);
+    char *value = rest;
+    if (!key || *value == '\0') {
+      conn_reply(conn, "ERR usage: APPEND key value\r\n");
+      return;
+    }
+    if (!check_type(conn, key, STORE_STRING)) return;
+    const char *current = store_get_string(key);
+    size_t old_len = current ? strlen(current) : 0;
+    size_t add_len = strlen(value);
+    if (old_len + add_len > MAX_STRING_LEN) {
+      conn_reply(conn, "ERR resulting string too long\r\n");
+      return;
+    }
+    char *combined = malloc(old_len + add_len + 1);
+    if (current) memcpy(combined, current, old_len);
+    memcpy(combined + old_len, value, add_len + 1); /* + the value's '\0' */
+    store_update_string(key, combined);
+    free(combined);
+    conn_reply(conn, "LEN %zu\r\n", old_len + add_len);
+
+  } else if (strcasecmp(cmd, "GETRANGE") == 0) {
+    char *key = next_token(&rest);
+    char *start_str = next_token(&rest);
+    long start, end;
+    if (!key || !start_str || !parse_long(start_str, &start) || !parse_long(rest, &end)) {
+      conn_reply(conn, "ERR usage: GETRANGE key start end\r\n");
+      return;
+    }
+    if (!check_type(conn, key, STORE_STRING)) return;
+    const char *value = store_get_string(key);
+    if (!value) value = "";
+    long len = (long)strlen(value);
+
+    if (start < 0) start += len;
+    if (end < 0) end += len;
+    if (start < 0) start = 0;
+    if (end >= len) end = len - 1;
+
+    if (len == 0 || start > end || start >= len) {
+      conn_reply(conn, "VALUE \r\n");
+      return;
+    }
+    conn_reply(conn, "VALUE %.*s\r\n", (int)(end - start + 1), value + start);
+
+  } else if (strcasecmp(cmd, "SETRANGE") == 0) {
+    char *key = next_token(&rest);
+    char *offset_str = next_token(&rest);
+    char *value = rest;
+    long offset;
+    if (!key || !offset_str || !parse_long(offset_str, &offset) || offset < 0 ||
+        *value == '\0') {
+      conn_reply(conn, "ERR usage: SETRANGE key offset value\r\n");
+      return;
+    }
+    if (!check_type(conn, key, STORE_STRING)) return;
+    const char *current = store_get_string(key);
+    size_t old_len = current ? strlen(current) : 0;
+    size_t add_len = strlen(value);
+    size_t new_len = (size_t)offset + add_len;
+    if (new_len < old_len) new_len = old_len; /* value ends before the current end */
+    if (new_len > MAX_STRING_LEN) {
+      conn_reply(conn, "ERR resulting string too long\r\n");
+      return;
+    }
+
+    char *buf = malloc(new_len + 1);
+    memset(buf, ' ', new_len); /* pad any gap before offset with spaces */
+    if (current) memcpy(buf, current, old_len);
+    memcpy(buf + offset, value, add_len);
+    buf[new_len] = '\0';
+    store_update_string(key, buf);
+    free(buf);
+    conn_reply(conn, "LEN %zu\r\n", new_len);
 
   /* --- list commands --- */
 

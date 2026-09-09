@@ -81,12 +81,34 @@ static void wbuf_append(Conn *conn, const char *data, size_t len) {
 }
 
 void conn_reply(Conn *conn, const char *fmt, ...) {
-  char buf[1024];
+  /* Fast path: most replies are short and fit in this stack buffer.
+   * vsnprintf's return value is the length it *would* need, which can
+   * exceed the buffer given to it (e.g. GET/GETRANGE on a large
+   * string) - falling back to a heap buffer of exactly that size
+   * avoids both silently truncating the reply and reading past the
+   * end of `stack_buf` on the append below. */
+  char stack_buf[256];
   va_list args;
   va_start(args, fmt);
-  int n = vsnprintf(buf, sizeof(buf), fmt, args);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int n = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args_copy);
+  va_end(args_copy);
+
+  if (n < 0) {
+    va_end(args);
+    return;
+  }
+
+  if ((size_t)n < sizeof(stack_buf)) {
+    wbuf_append(conn, stack_buf, (size_t)n);
+  } else {
+    char *heap_buf = malloc((size_t)n + 1);
+    vsnprintf(heap_buf, (size_t)n + 1, fmt, args);
+    wbuf_append(conn, heap_buf, (size_t)n);
+    free(heap_buf);
+  }
   va_end(args);
-  if (n > 0) wbuf_append(conn, buf, (size_t)n);
 }
 
 void conn_request_close(Conn *conn) {
