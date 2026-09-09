@@ -1,9 +1,24 @@
 # Klyro: what a C → Rust migration would require
 
-A scoping note for porting Klyro from C to Rust, as of 2026-09-09. Not a
-decision to migrate — see [klyro.md](klyro.md) for the current
-architecture and [roadmap.md](roadmap.md) for the current gap list. This
-only covers what the port itself would take.
+**Status: done (2026-09-09).** This started as a scoping note; the port
+described below was then carried out on the `rust-migration` branch,
+module by module in the order suggested here, validated at each step
+against the same behavior the C version had. `src/` is now a Cargo
+binary crate and [tests/](../tests/) is a Rust integration suite (see
+the README's "Test" section) - the C sources and the old Python test
+suite are gone. The wire protocol and the on-disk dump format are
+unchanged, so old `klyro.dump` files still load. The rest of this
+document is kept as-written for the reasoning behind each choice; see
+[klyro.md](klyro.md) for the (now historical) C architecture and
+[roadmap.md](roadmap.md) for the current gap list, which is
+language-agnostic and still applies.
+
+One deliberate deviation from the plan below: `SCAN`'s cursor is now a
+position in a sorted snapshot of the keyspace rather than a raw
+hashtable bucket index, since `std::collections::HashMap` doesn't
+expose one - same user-visible contract (a soft batch-size hint, `0`
+means done, same caveat about concurrent mutation), different internal
+mechanism.
 
 ## Why this is tractable
 

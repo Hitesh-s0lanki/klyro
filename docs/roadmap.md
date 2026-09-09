@@ -63,10 +63,10 @@ command/feature set.
 ## Software engineering
 
 - ~~No automated test suite~~ **Done (2026-09-09).** See
-  [tests/](../tests/) and `make test` — 52 integration tests covering
-  every command, WRONGTYPE, multi-value push/add, and a full
-  persistence round-trip. Still no CI (nothing runs `make test`
-  automatically on push).
+  [tests/](../tests/) and `cargo test` — 85 integration tests plus 22
+  unit tests covering every command, WRONGTYPE, multi-value push/add,
+  `KEYS`/`SCAN` pattern matching, and a full persistence round-trip.
+  Still no CI (nothing runs `cargo test` automatically on push).
 - No license file.
 
 ## Suggested next steps (roughly smallest/lowest-risk first)
@@ -78,7 +78,7 @@ command/feature set.
    protocol change (e.g. quoting or length-prefixing), which is really
    a stepping stone toward...
 5. **A binary-safe protocol (RESP-like)** - the biggest rewrite here;
-   touches `server.c`'s read/parse loop and every command's argument
+   touches `server.rs`'s read/parse loop and every command's argument
    parsing. Worth doing once the value-added by items 2-3 is in place.
 6. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
    separable efforts; not blocking anything else on this list.
