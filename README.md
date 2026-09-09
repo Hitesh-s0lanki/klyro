@@ -2,34 +2,40 @@
 
 **The high-performance in-memory data server.**
 
-An in-memory, Redis-style data server in C, with String, List, Hash, Set,
-and Sorted Set data types. Started from
-https://github.com/rairai77/cache22 (a bare skeleton, following
-https://www.youtube.com/watch?v=FFxEoQyNQKM) and grown from there.
+An in-memory, Redis-style data server in Rust, with String, List, Hash,
+Set, and Sorted Set data types. Started from
+https://github.com/rairai77/cache22 (a bare C skeleton, following
+https://www.youtube.com/watch?v=FFxEoQyNQKM), grown into a full C
+implementation, then migrated to Rust module-by-module (see
+[docs/rust-migration.md](docs/rust-migration.md)) - the wire protocol
+and on-disk dump format are unchanged throughout.
 
 ## Build
 
 ```sh
-make
+cargo build --release
 ```
 
 ## Test
 
 ```sh
-make test
+cargo test
 ```
 
-Runs the integration suite under [tests/](tests/) (Python 3, stdlib
-only - no dependencies to install): spawns real `klyro` server
-subprocesses, talks to them over the actual TCP protocol, and checks
-every command, WRONGTYPE errors, multi-value push/add, and a full
-persistence round-trip (save, kill, reload). `make test` builds first,
-so a plain `make test` from a clean checkout is enough.
+Runs the unit tests embedded in `src/` (parsing, glob matching, the
+store, persistence round-trips) plus the integration suite under
+[tests/](tests/): spawns real `klyro` server subprocesses, talks to
+them over the actual TCP protocol, and checks every command, WRONGTYPE
+errors, multi-value push/add, `KEYS`/`SCAN` pattern matching, and a
+full persistence round-trip (save, kill, reload). `cargo test` builds
+first, so a plain `cargo test` from a clean checkout is enough.
 
 ## Run
 
 ```sh
-./klyro [port] [dump-file]   # defaults: port 7171, dump-file klyro.dump
+cargo run --release -- [port] [dump-file]   # defaults: port 7171, dump-file klyro.dump
+# or, after `cargo build --release`:
+./target/release/klyro [port] [dump-file]
 ```
 
 On startup, Klyro loads `dump-file` if it exists. Data is saved back to
@@ -55,6 +61,17 @@ ZADD board 100 alice
 ZRANGE board 0 -1
 QUIT
 ```
+
+## Client libraries
+
+Official clients, each a small dependency-free wrapper around the
+protocol below (typed methods, one per command, tested against the
+real server) - see [docs/client-libraries.md](docs/client-libraries.md)
+for the design decisions behind them:
+
+- [clients/python/](clients/python/) - sync, stdlib `socket` only
+- [clients/node/](clients/node/) - async/Promise, TypeScript, zero runtime deps
+- [clients/go/](clients/go/) - stdlib `net` only
 
 ## Commands
 
@@ -157,60 +174,74 @@ exactly one value.
 ## Project layout
 
 ```
+Cargo.toml       - binary crate `klyro`; only dependency is `libc` (for poll())
+
 src/
-  klyro.h        - project identity (name/version/tagline)
-  main.c         - entry point: wires everything together
-  server.h/.c    - TCP networking + poll()-based event loop, connection I/O
-  commands.h/.c  - command-line parsing and dispatch
-  store.h/.c     - the keyspace: maps keys to typed values, with expiry
-  persist.h/.c   - save/load the whole keyspace to a dump file
+  main.rs        - entry point: wires everything together
+  server.rs      - TCP networking + poll()-based event loop, connection I/O
+  commands.rs    - command-line parsing and dispatch
+  store.rs       - the keyspace: maps keys to typed values, with expiry
+  persist.rs     - save/load the whole keyspace to a dump file
+  app.rs         - bundles Store + Persist + the running flag shared by the above
   types/         - the data type implementations
-    list.h/.c    -   List (doubly linked list)
-    hash.h/.c    -   Hash (field -> value map)
-    set.h/.c     -   Set (unique members)
-    zset.h/.c    -   Sorted Set (members ordered by score)
+    list.rs      -   List (a VecDeque<String> alias + Redis-style range())
+    hash.rs      -   Hash (a HashMap<String, String> alias)
+    set.rs       -   Set (a HashSet<String> alias)
+    zset.rs      -   Sorted Set (members ordered by (score, member))
   util/          - generic infrastructure with no keyspace/protocol knowledge
-    htable.h/.c  -   shared string-keyed hashtable (used by store/hash/set)
-    strutil.h/.c -   shared line-parsing helpers (used by commands + persist)
-    glob.h/.c    -   glob pattern matching (used by KEYS/SCAN)
+    strutil.rs   -   shared line-parsing helpers (used by commands + persist)
+    glob.rs      -   glob pattern matching (used by KEYS/SCAN)
 
 tests/           - the integration suite (see "Test" above)
-  klyro_helper.py -  starts/stops a klyro subprocess, speaks its protocol
-  test_generic.py -  PING/DEL/EXPIRE/TTL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN
-  test_types.py   -  String/List/Hash/Set/Zset ops, WRONGTYPE, empty-delete
-  test_multi.py   -  multi-value LPUSH/RPUSH/SADD/ZADD
-  test_persistence.py - save/kill/reload round-trip, TTL across a restart
+  common/mod.rs  -  starts/stops a klyro subprocess, speaks its protocol
+  generic.rs     -  PING/DEL/EXPIRE/TTL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN
+  types.rs       -  String/List/Hash/Set/Zset ops, WRONGTYPE, empty-delete
+  multi.rs       -  multi-value LPUSH/RPUSH/SADD/ZADD
+  scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
+  persistence.rs -  save/kill/reload round-trip, TTL across a restart
+
+clients/         - official client libraries (see "Client libraries" above)
+  python/        - sync, stdlib `socket` only
+  node/          - async/Promise, TypeScript, zero runtime deps
+  go/            - stdlib `net` only
 ```
 
 Each concern lives in its own module so new features can be added as new
 files without disturbing the others:
 
-- A new command → add a branch in `commands.c` (and a helper in `store.c`
-  if it needs new storage behavior).
-- A new data type → add `src/types/<type>.h/.c` with its own storage +
-  ops (reuse `util/htable.c` if it needs fast key lookup), add a
-  `StoreType` + accessors in `store.c`, wire commands for it into
-  `commands.c`, and a case in `persist.c`'s dump/load so it survives a
+- A new command → add a `match` arm in `commands.rs` (and a helper on
+  `Store` in `store.rs` if it needs new storage behavior).
+- A new data type → add `src/types/<type>.rs` with its own storage +
+  ops, add a `StoreType` variant + `get_or_create_*`/`get_existing_*`
+  accessors in `store.rs` (the `define_collection_accessors!` macro
+  covers most of the boilerplate), wire commands for it into
+  `commands.rs`, and a case in `persist.rs`'s dump/load so it survives a
   restart.
-- Pub/sub, replication, etc. → new modules alongside `server.c`/`store.c`,
-  hooked in from `main.c`.
+- Pub/sub, replication, etc. → new modules alongside `server.rs`/
+  `store.rs`, hooked in from `main.rs`.
 
-Includes are written root-relative to `src/` (e.g. `#include
-"types/list.h"`) regardless of which file does the including — the
-Makefile passes `-Isrc` so this resolves the same everywhere. Only
-same-directory includes (e.g. `list.c` including its own `list.h`) skip
-the prefix.
+Single-threaded by design, same as the original: `server.rs` runs one
+`poll()`-based event loop (via the `libc` crate, the closest match to
+the original C version's model) and owns the `Store` outright, so
+nothing needs `Arc`/`Mutex` - commands run to completion serialized
+through that one loop.
 
-`Makefile` picks up any `.c` file dropped into `src/` automatically.
+Unlike the old Python test suite (which shared one server per test
+class to cut process-spawn overhead), each Rust `#[test]` spawns its
+own dedicated `klyro` subprocess: it starts in milliseconds, and
+per-test isolation means `Drop` alone guarantees cleanup even when a
+test panics, with no shared state or key-namespacing needed between
+tests.
 
 ## Persistence format
 
-The dump file is a simple text format (see `persist.c`): a `KLYRO-DUMP 1`
-header line, then one record per key - `STRING key value`, or
-`LIST|HASH|SET|ZSET key count` followed by `count` data lines - plus an
-optional `EXPIREAT key unix-timestamp` line after a key's record if it
-has a TTL. Saves are atomic (written to `<path>.tmp`, then renamed over
-the real path), so a crash mid-save can't corrupt the existing dump.
+The dump file is a simple text format (see `persist.rs`), byte-compatible
+with the original C implementation: a `KLYRO-DUMP 1` header line, then
+one record per key - `STRING key value`, or `LIST|HASH|SET|ZSET key
+count` followed by `count` data lines - plus an optional `EXPIREAT key
+unix-timestamp` line after a key's record if it has a TTL. Saves are
+atomic (written to `<path>.tmp`, then renamed over the real path), so a
+crash mid-save can't corrupt the existing dump.
 
 ## Known limitations
 
@@ -222,8 +253,9 @@ the real path), so a crash mid-save can't corrupt the existing dump.
   append-only log — a `SIGKILL`/crash loses everything since the last
   save (on a normal exit, at most ~60s of changes).
 - `SETRANGE` pads gaps with ASCII spaces, not zero bytes like Redis —
-  values are plain null-terminated C strings internally, which can't
-  represent an embedded `\0` byte anyway.
+  kept for compatibility with the original C implementation's dump
+  format and observed behavior, though Rust's `String` has no trouble
+  representing an embedded `\0` byte.
 - `INCR`/`DECR`/`APPEND`/`SETRANGE` cap the resulting string at 64 KiB
   and reply with an `ERR` past that, to keep a single `APPEND`/`SETRANGE`
   loop from growing a value without bound.

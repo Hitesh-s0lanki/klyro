@@ -4,6 +4,14 @@
 **Inspiration:** https://www.youtube.com/watch?v=FFxEoQyNQKM — *"Coding a FAST Redis database server in C"*
 **License:** none
 
+> **This document describes the original C implementation and is now
+> historical.** The codebase was migrated to Rust on 2026-09-09 (see
+> [rust-migration.md](rust-migration.md)); the module boundaries and
+> "why this structure" reasoning below carried over largely unchanged,
+> but the file extensions and a few implementation details (e.g. the
+> hand-rolled `htable.c`) did not. See [../README.md](../README.md) for
+> the current project layout.
+
 ## Summary
 
 Klyro is an in-memory, Redis-style key/value data server in C. It started

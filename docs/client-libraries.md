@@ -1,14 +1,23 @@
 # Client libraries: what's required
 
 A scoping note for building official Klyro clients (Node.js/JS/TS, Python,
-and more), as of 2026-09-09. Planning only — nothing here has been built
-yet. See [../README.md](../README.md) for the current command/protocol
-reference and [rust-migration.md](rust-migration.md) for the (separate,
-independent) server-side migration note.
+and more), as of 2026-09-09. See [../README.md](../README.md) for the
+current command/protocol reference and [rust-migration.md](rust-migration.md)
+for the (separate, independent) server-side migration note.
+
+**Status: Python, Node.js/TypeScript, and Go clients are built** (see
+[clients/python/](../clients/python/), [clients/node/](../clients/node/),
+[clients/go/](../clients/go/) — each has its own README, is
+dependency-free beyond its language's standard library, and is tested
+against the real compiled server). The design decisions below (reply
+shapes, error mapping, sync-vs-async, fail-fast reconnection, per-language
+scope) are what those three clients actually implement; the rest of this
+document (naming, publishing, additional languages) is still forward-looking
+planning.
 
 ## What every client needs, regardless of language
 
-The wire protocol ([server.c](../src/server.c), [commands.c](../src/commands.c))
+The wire protocol ([server.rs](../src/server.rs), [commands.rs](../src/commands.rs))
 is simple enough that a client is mostly a thin wrapper, but a handful of
 details have to be gotten right or the client will silently misbehave:
 
@@ -29,12 +38,9 @@ details have to be gotten right or the client will silently misbehave:
     whole reply; otherwise keep reading until a line equal to `END`.
   - Every reply line from the server is `\r\n`-terminated; requests only
     need `\n`.
-- **Full current command surface.** [commands.c](../src/commands.c) already
-  implements more than the README documents — `INCR`/`DECR`/`APPEND`/
-  `GETRANGE`/`SETRANGE` exist in the code but aren't in the command table
-  yet. A client should be built against the actual dispatch table in
-  `commands.c`, not just the README, and the README gap should get fixed
-  alongside (or before) writing clients.
+- **Full current command surface.** A client should be built against the
+  actual dispatch table in [commands.rs](../src/commands.rs), not just
+  the README, in case the two ever drift.
 - **Injection safety.** `SET`/`HSET` values are "rest of the line" (may
   contain spaces) but **must not contain `\n`** — the protocol has no
   escaping, so a value with an embedded newline would be parsed as a
@@ -50,7 +56,7 @@ details have to be gotten right or the client will silently misbehave:
   subtype or a checkable field) since it's the one error callers are
   likely to branch on.
 - **Reply size limit.** A single reply is capped at 64 KiB server-side
-  (`MAX_MSG` in [server.c](../src/server.c)) — clients don't need to do
+  (`MAX_MSG` in [server.rs](../src/server.rs)) — clients don't need to do
   anything special, but large `GET`/`LRANGE`/etc. results can legitimately
   hit `ERR line too long`-style limits and that's worth surfacing in docs,
   not swallowing.
@@ -78,32 +84,39 @@ details have to be gotten right or the client will silently misbehave:
 
 ## Per-language scope
 
-**Node.js / TypeScript** (one package covers both, since TS compiles to
-plain JS and ships `.d.ts` types for TS consumers):
+**Node.js / TypeScript** — done, see [clients/node/](../clients/node/)
+(one package covers both, since TS compiles to plain JS and ships
+`.d.ts` types for TS consumers):
 - `net.Socket`-based transport, Promise API, one command method per
   server command (typed request args, typed return values per the reply
   shapes above).
-- Build via `tsc` to a `dist/` the package's `main`/`types` point at;
-  ESM-only is enough for Node ≥16 (CJS interop via `require`d dual build
-  adds tooling for little benefit at this size).
+- Built via `tsc` to `dist/`, which the package's `main`/`types` point
+  at; ESM-only (Node ≥18).
 - Tests: spawn a real `klyro` subprocess (same approach as
-  [tests/klyro_helper.py](../tests/klyro_helper.py)) and exercise every
+  [tests/common/mod.rs](../tests/common/mod.rs)) and exercise every
   command against it — no mocking, since the whole point is protocol
-  fidelity.
+  fidelity. Run via Node's built-in test runner (`node --test`), no
+  external test framework dependency.
 
-**Python:**
+**Python** — done, see [clients/python/](../clients/python/):
 - `socket`-based transport (stdlib only, matching the project's existing
-  "no dependencies" pattern in [tests/](../tests/)), sync client first.
-- Packaged via `pyproject.toml`, type-hinted.
+  "no dependencies" pattern in [tests/](../tests/)), sync client.
+- Packaged via `pyproject.toml`, type-hinted (ships a `py.typed` marker).
 - Same subprocess-based test strategy, reusing the spawn/probe logic
-  already in `tests/klyro_helper.py` rather than re-inventing it.
+  already in `tests/common/mod.rs` rather than re-inventing it.
+
+**Go** — done, see [clients/go/](../clients/go/):
+- `net`-based transport (stdlib only), a `Dial()`-first API idiomatic
+  for a small Go TCP client, internally mutex-guarded for safe
+  concurrent use of one `*Client`.
+- Packaged as its own module (`go.mod`), zero dependencies.
+- Same subprocess-based test strategy via the standard `testing`
+  package.
 
 **More languages, if/when wanted:** the protocol is simple enough (one
-TCP socket + line framing) that Go, Rust, Java, Ruby, or PHP clients are
+TCP socket + line framing) that Rust, Java, Ruby, or PHP clients are
 each a small, self-contained port of the same design — worth doing on
-demand rather than upfront. A Go client would be a natural next pick if
-one more is wanted, since it's commonly reached for alongside
-infra/server tooling like this.
+demand rather than upfront.
 
 ## Shared testing strategy (avoids N drifting test suites)
 
