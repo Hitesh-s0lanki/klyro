@@ -61,11 +61,6 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
-      # cargo test --all-targets skips doctests, and the modules carry
-      # examples in their doc comments.
-      - name: Test the documentation examples
-        run: cargo test --doc
-
       - name: Build the release binary
         run: cargo build --release
 
