@@ -70,7 +70,8 @@ export default function LimitationsPage() {
       <RefTable
         head={["Limit", "Consequence"]}
         rows={[
-          ["No maxmemory or eviction policy", "The dataset grows until the process runs out of memory; INFO reports usage, nothing acts on it"],
+          ["Eviction is approximate", "A victim is the best of maxmemory-samples random draws, not the true least-recently-used key"],
+          ["maxmemory measures the process", "Client buffers and the runtime count toward it, so a limit below what the server needs at rest can never be met"],
           ["Snapshot-only persistence", "A SIGKILL or crash loses everything since the last save; at most ~60s on a normal exit"],
           ["No replication or clustering", "One process, one node, bounded by one machine's RAM and one CPU core"],
           ["Single-threaded event loop", "One slow command delays every other client"],

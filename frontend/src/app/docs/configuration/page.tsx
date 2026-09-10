@@ -67,6 +67,9 @@ klyro --config klyro.conf 7200`}
           ["client-output-buffer-limit", "268435456", "Unsent reply allowed to pile up per client"],
           ["scan-default-count", "10", "COUNT used by SCAN when the caller gives none"],
           ["zadd-max-pairs", "128", "Most score/member pairs one ZADD may carry"],
+          ["maxmemory", "0", "Bytes the process may hold before eviction starts; 0 is no limit"],
+          ["maxmemory-policy", "noeviction", "Which key to drop at the limit; one of the eight Redis policies"],
+          ["maxmemory-samples", "5", "Keys sampled per eviction round"],
         ]}
       />
 

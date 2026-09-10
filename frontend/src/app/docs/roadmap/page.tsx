@@ -26,6 +26,8 @@ export default function RoadmapPage() {
           ["Memory as a native type", "Three modes, 15 MEM.* commands, filters, fusion, per-record TTL"],
           ["Dump format v3", "Memory indexes persist and reload; v1 and v2 dumps still load"],
           ["Configuration surface", "Config file, command line, CONFIG GET/SET, and an INFO memorydb section"],
+          ["Transactions and pub/sub", "MULTI/EXEC/WATCH, channel and pattern subscriptions, and the blocking pops"],
+          ["maxmemory and eviction", "All eight Redis policies, approximate sampling, and an OOM refusal for writes that could grow the keyspace"],
           ["Container image", "Two-stage static musl build, ~15 MB, unprivileged, with a protocol-level healthcheck"],
         ]}
       />
@@ -45,11 +47,10 @@ export default function RoadmapPage() {
 
       <h2 id="under-consideration">Under consideration</h2>
       <ul>
-        <li>Transactions (<code>MULTI</code>/<code>EXEC</code>) and pub/sub.</li>
         <li>Streams, bitmaps, HyperLogLog, and geospatial types.</li>
         <li>
-          <code>maxmemory</code> with an eviction policy, which matters more once
-          indexes outlive a single session.
+          Keyspace notifications, so a client can be told a key changed without
+          anyone publishing it.
         </li>
         <li>A skip-list sorted set, replacing today&rsquo;s O(n) sorted array.</li>
       </ul>

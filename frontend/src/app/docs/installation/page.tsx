@@ -8,7 +8,7 @@ import { site } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "Installation",
-  description: "Run Klyro from the published container image, with Compose, or as a locally built binary.",
+  description: "Run Klyro from npm, from the published container image, with Compose, or as a locally built binary.",
 };
 
 export default function InstallationPage() {
@@ -17,8 +17,58 @@ export default function InstallationPage() {
       <DocHeader
         eyebrow="Get started"
         title="Installation"
-        lead="Klyro is a single static binary with one dependency. Run the published image, bring it up with Compose, or build it from source."
+        lead="Klyro is a single static binary with one dependency. Install it from npm, run the published image, bring it up with Compose, or build it from source."
       />
+
+      <h2 id="npm">npm</h2>
+      <p>
+        The shortest path from nothing to a running server. npm downloads a
+        prebuilt binary for your machine; no Rust toolchain and no container
+        runtime are involved.
+      </p>
+      <CodeTabs
+        tabs={[
+          {
+            label: "npx",
+            lang: "bash",
+            code: `npx klyro-db                # port 7171, dump file klyro.dump
+npx klyro-db 7200           # a different port
+npx klyro-db klyro.conf     # a config file`,
+          },
+          {
+            label: "Install",
+            lang: "bash",
+            code: `npm install -g klyro-db
+
+# leaves a klyro command on your PATH, taking the
+# same arguments as the binary
+klyro 7200 data.dump`,
+          },
+        ]}
+        className="my-6"
+      />
+      <p>
+        <code>klyro-db</code> is a launcher plus one platform&apos;s build. The
+        binaries ship as separate packages, one per platform, and npm installs
+        only the one that matches:
+      </p>
+      <RefTable
+        head={["Platform", "Package"]}
+        rows={[
+          ["macOS, Apple silicon", "klyro-db-darwin-arm64"],
+          ["macOS, Intel", "klyro-db-darwin-x64"],
+          ["Linux arm64, glibc", "klyro-db-linux-arm64"],
+          ["Linux x64, glibc", "klyro-db-linux-x64"],
+        ]}
+      />
+      <Callout variant="warning" title="No Windows build">
+        <p>
+          Klyro&apos;s event loop is <code>poll(2)</code> and it writes its dump
+          from a POSIX signal handler, so there is no Windows binary to publish.
+          Use Docker or WSL. Alpine and other musl distributions are covered by
+          the container image, which is already musl-static.
+        </p>
+      </Callout>
 
       <h2 id="docker">Docker</h2>
       <p>
