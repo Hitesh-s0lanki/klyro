@@ -5,23 +5,35 @@ all of this is necessarily worth building — some items (clustering,
 replication) are here for completeness, not because a single-node
 educational project needs them. See [klyro.md](klyro.md) for the
 current architecture and [../README.md](../README.md) for the current
-command/feature set.
+command/feature set. For the detailed command-level inventory - every
+missing Redis command grouped by type, plus semantics deviations and a
+suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 
 ## Protocol & transport
 
-- **Text line protocol, not RESP.** Values can't contain `\n`, single
-  replies are capped at 64 KiB, no binary-safety — a real client
-  library couldn't talk to it, only a raw TCP client (`nc`/telnet).
+- ~~Text line protocol, not RESP~~ **Done (2026-09-10).** Klyro speaks
+  RESP2 and RESP3. Values are binary-safe, replies are never silently
+  truncated, and redis-py, go-redis, and ioredis all work unmodified.
+  See [resp-protocol.md](resp-protocol.md).
 - No transactions (`MULTI`/`EXEC`).
 - No pub/sub (`SUBSCRIBE`/`PUBLISH`).
-- No official client library or CLI (`klyro-cli`).
+- ~~No official client library or CLI~~ **Moot (2026-09-10).** Any
+  Redis client works, `redis-cli` included, so the three hand-written
+  clients were retired. See [client-libraries.md](client-libraries.md).
 
 ## Data model
 
 - Only 5 basic types — no Streams, Bitmaps, HyperLogLog, Geospatial.
-- `LPUSH`/`RPUSH`/`SADD`/`ZADD` values must be single tokens (no
-  embedded spaces) so multiple values per call stay unambiguous - a
-  value with spaces has to go through `SET`/`HSET` instead.
+- ~~No command coverage beyond the basics~~ **Done (2026-09-10).** The
+  command set went from 39 to 105: the full expiry family, keyspace
+  operations (`EXISTS`/`RENAME`/`COPY`/`FLUSHDB`), `SET` option flags,
+  the `SETNX`/`SETEX` family, multi-key string access, list random
+  access and trimming, the hash ergonomics, the set algebra, and sorted
+  set ranks and score ranges. See
+  [redis-feature-gap.md](redis-feature-gap.md) for what remains.
+- ~~Values must be single tokens~~ **Done (2026-09-10).** RESP
+  length-prefixes every argument, so any value may contain spaces,
+  newlines, or NUL bytes.
 - ~~No key pattern matching~~ **Done (2026-09-09).** `KEYS pattern` and
   `SCAN cursor [MATCH pattern] [COUNT count]` are in - see the README's
   generic command table. No `EXPIRE NX/XX` flags still.
@@ -30,6 +42,8 @@ command/feature set.
   command table.
 - Sorted Set is O(n) (sorted array + linear scan), not a skip list -
   fine at moderate scale, not built for large sets.
+- No `ZUNIONSTORE`/`ZINTERSTORE`, no lexicographic ranges, and no
+  `ZADD` flags.
 
 ## Durability & persistence
 
@@ -47,25 +61,31 @@ command/feature set.
   read/write access.
 - No TLS.
 - No memory limits or eviction policies (LRU/LFU) - the dataset grows
-  until the process runs out of memory.
-- No metrics/observability - no `INFO` command, no stats (hit rate,
-  ops/sec, memory usage), no logging beyond startup/shutdown lines.
-- No config file - only two CLI args (port, dump path); everything else
-  (autosave interval, max connections, ...) is hardcoded.
+  until the process runs out of memory. `INFO memory` measures it, but
+  nothing acts on the measurement.
+- ~~No metrics/observability~~ **Done (2026-09-10).** `INFO` reports
+  six sections, including real memory use from a counting allocator and
+  a read-command hit ratio. Still no logging beyond startup/shutdown
+  lines, and no per-command statistics.
+- ~~No config file~~ **Done (2026-09-10).** Nine parameters, settable
+  from a file or the command line, seven of them changeable at runtime
+  with `CONFIG SET`. See [configuration.md](configuration.md). No
+  `CONFIG REWRITE` yet, so a runtime change doesn't survive a restart.
 
 ## Concurrency & scale
 
 - Single-threaded - same core design as real Redis, but Redis has
   optional I/O threading; this has none.
-- No connection limits - nothing stops a client from opening many
-  connections.
+- ~~No connection limits~~ **Done (2026-09-10).** `maxclients` turns
+  extra connections away with a message; `INFO clients` counts how often.
 
 ## Software engineering
 
-- ~~No automated test suite~~ **Done (2026-09-09).** See
-  [tests/](../tests/) and `cargo test` — 85 integration tests plus 22
-  unit tests covering every command, WRONGTYPE, multi-value push/add,
-  `KEYS`/`SCAN` pattern matching, and a full persistence round-trip.
+- ~~No automated test suite~~ **Done (2026-09-09, extended
+  2026-09-10).** See [tests/](../tests/) and `cargo test` — 248 tests
+  covering every command, WRONGTYPE, multi-value push/add,
+  `KEYS`/`SCAN` pattern matching, INFO/CONFIG, config-file loading,
+  RESP framing, and a full persistence round-trip.
   Still no CI (nothing runs `cargo test` automatically on push).
 - No license file.
 
@@ -74,11 +94,15 @@ command/feature set.
 1. ~~**Automated test suite**~~ Done — see above.
 2. ~~**String/numeric ergonomics**~~ Done — see above.
 3. ~~**`SCAN`/`KEYS pattern`**~~ Done — see above.
-4. **Values with embedded spaces in List/Set/Zset** - would need a
-   protocol change (e.g. quoting or length-prefixing), which is really
-   a stepping stone toward...
-5. **A binary-safe protocol (RESP-like)** - the biggest rewrite here;
-   touches `server.rs`'s read/parse loop and every command's argument
-   parsing. Worth doing once the value-added by items 2-3 is in place.
-6. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
-   separable efforts; not blocking anything else on this list.
+4. ~~**Command coverage**~~ Done - see above.
+5. ~~**`INFO`/`CONFIG` plus a config file**~~ Done - see above.
+6. ~~**Values with embedded spaces in List/Set/Zset**~~ Done - see
+   above.
+7. ~~**A binary-safe protocol (RESP-like)**~~ Done - see above.
+8. **Transactions (`MULTI`/`EXEC`/`WATCH`)** - now the top of the list.
+   The command layer already returns a reply value instead of writing to
+   a socket, which is most of what queuing a transaction needs.
+9. **Pub/sub, then blocking commands** - both need the event loop to
+   park and wake a connection, the one piece RESP did not bring.
+10. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
+    separable efforts; not blocking anything else on this list.

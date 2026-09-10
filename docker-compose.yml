@@ -1,0 +1,17 @@
+services:
+  klyro:
+    build: .
+    image: klyro:latest
+    # Host 7171 -> container 7171. Change only the left-hand number to
+    # move it out of the way of something else on the host.
+    ports:
+      - "7171:7171"
+    volumes:
+      - klyro-data:/data
+    # Klyro saves the dump on SIGTERM; the default 10s stop timeout is
+    # plenty for that, but a large keyspace can use the room.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  klyro-data:

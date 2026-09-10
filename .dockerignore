@@ -1,0 +1,15 @@
+# Everything the image build doesn't read: it needs only Cargo.toml,
+# Cargo.lock, src/, and the two docker-*.sh scripts.
+target/
+.git/
+.github/
+.gitignore
+clients/
+docs/
+tests/
+*.dump
+*.dump.tmp
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -3,12 +3,17 @@
 **The high-performance in-memory data server.**
 
 An in-memory, Redis-style data server in Rust, with String, List, Hash,
-Set, and Sorted Set data types. Started from
-https://github.com/rairai77/cache22 (a bare C skeleton, following
-https://www.youtube.com/watch?v=FFxEoQyNQKM), grown into a full C
-implementation, then migrated to Rust module-by-module (see
-[docs/rust-migration.md](docs/rust-migration.md)) - the wire protocol
-and on-disk dump format are unchanged throughout.
+Set, and Sorted Set data types.
+
+**It speaks RESP, so any Redis client library works** - redis-py,
+go-redis, ioredis, and `redis-cli` all connect with no adapter. Values
+are binary-safe.
+
+Started from https://github.com/rairai77/cache22 (a bare C skeleton,
+following https://www.youtube.com/watch?v=FFxEoQyNQKM), grown into a
+full C implementation, then migrated to Rust module-by-module (see
+[docs/rust-migration.md](docs/rust-migration.md)), then given the Redis
+wire protocol (see [docs/resp-protocol.md](docs/resp-protocol.md)).
 
 ## Build
 
@@ -22,13 +27,18 @@ cargo build --release
 cargo test
 ```
 
-Runs the unit tests embedded in `src/` (parsing, glob matching, the
-store, persistence round-trips) plus the integration suite under
-[tests/](tests/): spawns real `klyro` server subprocesses, talks to
-them over the actual TCP protocol, and checks every command, WRONGTYPE
-errors, multi-value push/add, `KEYS`/`SCAN` pattern matching, and a
-full persistence round-trip (save, kill, reload). `cargo test` builds
-first, so a plain `cargo test` from a clean checkout is enough.
+Runs the unit tests embedded in `src/` (RESP encoding and parsing, glob
+matching, the store, persistence round-trips) plus the integration suite
+under [tests/](tests/): spawns real `klyro` server subprocesses, talks
+RESP to them over a real socket, and checks every command's reply type,
+WRONGTYPE errors, binary-safe values, pipelining, protocol errors,
+`KEYS`/`SCAN` pattern matching, and a full persistence round-trip (save,
+kill, reload). 248 tests in all. `cargo test` builds first, so a plain
+`cargo test` from a clean checkout is enough.
+
+Compatibility with real client libraries is verified separately, by
+running command sweeps through redis-py, go-redis, and ioredis; see
+[docs/client-libraries.md](docs/client-libraries.md).
 
 ## Run
 
@@ -36,7 +46,16 @@ first, so a plain `cargo test` from a clean checkout is enough.
 cargo run --release -- [port] [dump-file]   # defaults: port 7171, dump-file klyro.dump
 # or, after `cargo build --release`:
 ./target/release/klyro [port] [dump-file]
+./target/release/klyro klyro.conf           # or a config file
+./target/release/klyro --config klyro.conf 7200
 ```
+
+Settings come from a config file, the command line, or both - command
+line arguments are applied last, so they win. Copy
+[klyro.conf.sample](klyro.conf.sample) to get started; it documents every
+parameter at its default value. `CONFIG GET`/`CONFIG SET` read and change
+the same settings on a running server, and `INFO` reports what the server
+is doing. See [docs/configuration.md](docs/configuration.md).
 
 On startup, Klyro loads `dump-file` if it exists. Data is saved back to
 it on graceful shutdown (`SHUTDOWN` command, or `SIGINT`/`SIGTERM`), on
@@ -44,134 +63,257 @@ an explicit `SAVE` command, and automatically every 60s if anything
 changed. Killing the process (`SIGKILL`, a crash, or power loss) loses
 any changes since the last save.
 
-## Talk to it
+## Run with Docker
 
-Any line-oriented TCP client works, e.g. `nc`:
+Every merge to `main` publishes an image, so there is usually nothing to
+build:
 
 ```sh
-nc localhost 7171
-SET foo bar
-GET foo
-LPUSH mylist a
-LRANGE mylist 0 -1
-HSET user name Alice
-HGETALL user
-SADD tags fast
-ZADD board 100 alice
-ZRANGE board 0 -1
-QUIT
+docker run -d --name klyro -p 7171:7171 -v klyro-data:/data \
+    ghcr.io/hitesh-s0lanki/klyro:latest
 ```
 
-## Client libraries
+Tags are `latest`, the version from `Cargo.toml` (`0.1.0`, and `0.1`),
+and `sha-<commit>` for a specific build. Pin the version tag for
+anything you care about. To build it yourself instead:
 
-Official clients, each a small dependency-free wrapper around the
-protocol below (typed methods, one per command, tested against the
-real server) - see [docs/client-libraries.md](docs/client-libraries.md)
-for the design decisions behind them:
+```sh
+docker build -t klyro .
+docker run -d --name klyro -p 7171:7171 -v klyro-data:/data klyro
+```
 
-- [clients/python/](clients/python/) - sync, stdlib `socket` only
-- [clients/node/](clients/node/) - async/Promise, TypeScript, zero runtime deps
-- [clients/go/](clients/go/) - stdlib `net` only
+Or with Compose, which sets up the port and the volume for you:
+
+```sh
+docker compose up -d
+```
+
+The image is a two-stage build - a static musl binary from
+`rust:1-alpine`, copied onto a bare Alpine runtime - so it comes out
+around 15 MB. It runs as an unprivileged user (uid 10001), keeps the
+dump file in the `/data` volume, and carries a healthcheck that
+`PING`s the server over the real protocol.
+
+`docker stop` sends `SIGTERM`, which Klyro handles by saving the dump
+before exiting, so data survives a restart. Compose allows 30s for
+that; raise `stop_grace_period` if a large keyspace needs longer.
+
+Three environment variables configure the container:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KLYRO_PORT` | `7171` | Port to listen on, inside the container |
+| `KLYRO_DUMP` | `/data/klyro.dump` | Dump file path |
+| `KLYRO_CONFIG` | unset | Config file to load, e.g. a mounted copy of `klyro.conf.sample` |
+
+```sh
+# a config file from the host, on a different port
+docker run -d -p 6380:6380 \
+    -e KLYRO_PORT=6380 \
+    -e KLYRO_CONFIG=/etc/klyro/klyro.conf \
+    -v $PWD/klyro.conf:/etc/klyro/klyro.conf:ro \
+    -v klyro-data:/data \
+    klyro
+```
+
+`KLYRO_PORT` is passed on the command line, so it overrides a `port`
+line in `KLYRO_CONFIG`. Arguments given to `docker run` after the image
+name bypass all three and go straight to the binary. See
+[docs/docker.md](docs/docker.md) for the decisions behind the image.
+
+## Talk to it
+
+Any Redis client library works. There is no Klyro-specific client to
+install:
+
+```python
+import redis
+
+r = redis.Redis(host="localhost", port=7171, decode_responses=True)
+r.set("greeting", "hello")
+r.get("greeting")
+
+# The distributed-lock primitive
+r.set("lock:job", "token", nx=True, ex=30)
+```
+
+`redis-cli -p 7171` works too. So does `nc`, because Klyro accepts
+Redis's inline command form - replies come back in RESP, so they carry
+type markers:
+
+```
+$ nc localhost 7171
+PING
++PONG
+SET greeting "hello there"
++OK
+GET greeting
+$11
+hello there
+LPUSH mylist a
+:1
+```
+
+See [docs/client-libraries.md](docs/client-libraries.md) for Go and
+Node.js examples and the list of clients verified against Klyro.
 
 ## Commands
 
-Generic (any type):
+107 commands. Reply types match Redis's, which is what lets stock client
+libraries decode them; the tables below name the type rather than the
+literal bytes.
+
+### Generic (any type)
 
 | Command | Reply |
 |---|---|
-| `PING` | `PONG` |
-| `DEL key` | `OK` or `NOT_FOUND` |
-| `EXPIRE key seconds` | `OK` or `NOT_FOUND` |
-| `TTL key` | `TTL <seconds>` (`-1` = no expiry, `-2` = missing) |
-| `TYPE key` | `STRING`/`LIST`/`HASH`/`SET`/`ZSET`, or `NONE` if missing |
-| `KEYS [pattern]` | one matching key per line, terminated by `END` (no pattern = every key) |
-| `SCAN cursor [MATCH pattern] [COUNT count]` | matching keys, then a final `CURSOR <n>` line |
-| `DBSIZE` | `COUNT <n>` |
+| `PING [message]` | `PONG`, or the message |
+| `ECHO message` | the message |
+| `HELLO [protover]` | server info; `HELLO 3` switches to RESP3 |
+| `DEL key [key ...]` / `UNLINK key [key ...]` | number of keys removed |
+| `EXISTS key [key ...]` | how many exist (a repeated key counts each time) |
+| `EXPIRE key seconds` / `PEXPIRE key ms` | `1` if the TTL was set, `0` if the key is missing |
+| `EXPIREAT key unix-seconds` / `PEXPIREAT key unix-ms` | `1` or `0` |
+| `PERSIST key` | `1` if a TTL was removed, else `0` |
+| `TTL key` | seconds left, `-1` no expiry, `-2` missing |
+| `PTTL key` | the same in milliseconds |
+| `TYPE key` | `string`/`list`/`hash`/`set`/`zset`, or `none` |
+| `RENAME key newkey` | `OK`, or an error if the source is missing |
+| `RENAMENX key newkey` | `1`, or `0` if the destination exists |
+| `COPY source destination [REPLACE]` | `1` if copied, else `0` |
+| `RANDOMKEY` | a key, or nil if the keyspace is empty |
+| `KEYS pattern` | array of matching keys |
+| `SCAN cursor [MATCH pattern] [COUNT count]` | `[next-cursor, [keys...]]` |
+| `DBSIZE` | number of live keys |
+| `FLUSHDB` / `FLUSHALL` | `OK` (one keyspace, so both do the same thing) |
+| `INFO [section]` | one text blob of `# Section` headers over `key:value` lines |
+| `CONFIG GET pattern [pattern ...]` | map of parameter to value |
+| `CONFIG SET parameter value` | `OK`, or an error explaining the refusal |
+| `CONFIG RESETSTAT` | `OK` (clears INFO's activity counters) |
 | `SAVE` | `OK` (writes the dump file immediately) |
-| `QUIT` | `BYE`, then closes the connection |
-| `SHUTDOWN` | `SHUTTING_DOWN`, then stops the server (saving first) |
+| `QUIT` | `OK`, then closes the connection |
+| `SHUTDOWN` | `OK`, then stops the server (saving first) |
 
-`KEYS`/`SCAN`'s `pattern` is a glob: `*` matches any run of characters,
-`?` matches exactly one, `[abc]`/`[a-z]`/`[^abc]` match a character
-class. `SCAN` starts with cursor `0`; keep passing back the `CURSOR`
-value from each reply until it comes back `0` again, which means the
-whole keyspace has been covered (matching Redis's own convention).
-`COUNT` (default 10) is how many keys each call examines; `MATCH` is
-applied after that, so a call can return fewer than `COUNT` keys (even
-none) while the cursor is still non-zero - keep iterating until it is
-`0`. The cursor is a position in a sorted snapshot of the live
-keyspace, taken fresh on each call, so - unlike Redis - inserts or
-deletes between two `SCAN` calls can cause a key to be skipped or
-repeated; fine for interactive/dev use.
+`COPY` is a deep copy: mutating the destination afterwards leaves the
+source untouched. `RENAME` and `COPY` both carry the TTL across.
 
-String:
+### Strings
 
 | Command | Reply |
 |---|---|
-| `SET key value` | `OK` (value is the rest of the line — may contain spaces) |
-| `GET key` | `VALUE <value>` or `NOT_FOUND` |
-| `INCR key` / `DECR key` | `VALUE <n>` (missing key starts at 0; errors if the current value isn't an integer) |
-| `APPEND key value` | `LEN <n>` (new total length; creates the key if missing) |
-| `GETRANGE key start end` | `VALUE <substring>` (inclusive range; negative indices count from the end; out-of-range is an empty value, not an error) |
-| `SETRANGE key offset value` | `LEN <n>` (new total length; pads any gap before `offset` with spaces) |
+| `SET key value [NX\|XX] [GET] [EX s\|PX ms\|EXAT ts\|PXAT ts\|KEEPTTL]` | `OK`, or nil when `NX`/`XX` isn't satisfied |
+| `SETNX key value` | `1` if written, else `0` |
+| `SETEX key seconds value` / `PSETEX key ms value` | `OK` |
+| `GET key` | the value, or nil |
+| `GETSET key value` | the previous value, or nil; clears any TTL |
+| `GETDEL key` | the value, or nil; removes the key |
+| `GETEX key [EX s\|PX ms\|PERSIST]` | the value, or nil; adjusts the TTL |
+| `MGET key [key ...]` | array of values, nil per missing key |
+| `MSET key value [key value ...]` | `OK` |
+| `MSETNX key value [key value ...]` | `1` if all were written, `0` if any key existed |
+| `INCR key` / `DECR key` | the new value |
+| `INCRBY key n` / `DECRBY key n` | the new value |
+| `INCRBYFLOAT key n` | the new value, as text |
+| `APPEND key value` | the new length |
+| `STRLEN key` | the length, `0` if missing |
+| `GETRANGE key start end` / `SUBSTR key start end` | the substring (inclusive; negative indices count from the end) |
+| `SETRANGE key offset value` | the new length (pads any gap with NUL bytes) |
 
-`INCR`/`DECR`/`APPEND`/`SETRANGE` mutate a string in place and preserve
-any existing `EXPIRE` — unlike `SET`, which always clears it.
+`SET key value NX EX 30` is the atomic lock primitive: it takes the key
+only if nobody holds it, and the lease expires on its own.
 
-List (ordered values):
+`INCR`/`DECR`/`INCRBY`/`APPEND`/`SETRANGE` keep an existing TTL; `SET`
+(without `KEEPTTL`), `GETSET`, and `MSET` clear it.
 
-| Command | Reply |
-|---|---|
-| `LPUSH key value [value ...]` / `RPUSH key value [value ...]` | `LEN <n>` (new length, after pushing all given values) |
-| `LPOP key` / `RPOP key` | `VALUE <value>` or `NOT_FOUND` |
-| `LLEN key` | `LEN <n>` |
-| `LRANGE key start stop` | one value per line, then `END` (inclusive range; negative indices count from the end) |
-
-`LPUSH key a b c` pushes each value to the head in turn (so the list ends
-up `c b a`), matching Redis; `RPUSH key a b c` pushes to the tail (`a b c`).
-
-Hash (field → value):
-
-| Command | Reply |
-|---|---|
-| `HSET key field value` | `OK` |
-| `HGET key field` | `VALUE <value>` or `NOT_FOUND` |
-| `HDEL key field` | `OK` or `NOT_FOUND` |
-| `HLEN key` | `LEN <n>` |
-| `HGETALL key` | alternating `field`/`value` lines, then `END` |
-
-Set (unique members):
+### Lists
 
 | Command | Reply |
 |---|---|
-| `SADD key member [member ...]` | `ADDED <n>` (count of members that were newly added, excluding duplicates) |
-| `SREM key member` | `OK` or `NOT_FOUND` |
-| `SISMEMBER key member` | `TRUE` or `FALSE` |
-| `SCARD key` | `LEN <n>` |
-| `SMEMBERS key` | one member per line, then `END` |
+| `LPUSH key value [value ...]` / `RPUSH key value [value ...]` | the new length |
+| `LPUSHX ...` / `RPUSHX ...` | the new length, or `0` if the key doesn't exist |
+| `LPOP key [count]` / `RPOP key [count]` | one value or nil; with a count, an array (null array if the key is missing) |
+| `LLEN key` | the length |
+| `LRANGE key start stop` | array of values |
+| `LINDEX key index` | the value, or nil |
+| `LSET key index value` | `OK`, or an error if the key or index is out of range |
+| `LINSERT key BEFORE\|AFTER pivot value` | the new length, `-1` if the pivot is absent, `0` if the key is |
+| `LREM key count value` | how many were removed (`count > 0` from the head, `< 0` from the tail, `0` all) |
+| `LTRIM key start stop` | `OK` (an empty range deletes the key) |
+| `RPOPLPUSH source destination` | the moved value, or nil |
+| `LMOVE source destination LEFT\|RIGHT LEFT\|RIGHT` | the moved value, or nil |
 
-Sorted Set (members ordered by score):
+`RPOPLPUSH`/`LMOVE` may name the same list twice, which rotates it.
+
+### Hashes
 
 | Command | Reply |
 |---|---|
-| `ZADD key score member [score member ...]` | `ADDED <n>` (count of members newly added; repositioning an existing member's score doesn't count) |
-| `ZSCORE key member` | `VALUE <score>` or `NOT_FOUND` |
-| `ZREM key member` | `OK` or `NOT_FOUND` |
-| `ZCARD key` | `LEN <n>` |
-| `ZRANGE key start stop` | `member score` per line, ascending by score, then `END` |
+| `HSET key field value [field value ...]` | number of fields added |
+| `HSETNX key field value` | `1` if written, `0` if the field exists |
+| `HMSET key field value [field value ...]` | `OK` |
+| `HGET key field` | the value, or nil |
+| `HMGET key field [field ...]` | array of values, nil per missing field |
+| `HDEL key field [field ...]` | number of fields removed |
+| `HLEN key` | the field count |
+| `HEXISTS key field` | `1` or `0` |
+| `HSTRLEN key field` | the value's length, `0` if missing |
+| `HKEYS key` / `HVALS key` | array of fields, or of values |
+| `HGETALL key` | map of field to value |
+| `HINCRBY key field n` | the new value |
+| `HINCRBYFLOAT key field n` | the new value, as text |
 
-`ZADD` takes up to 128 score/member pairs per call; more than that (or a
-score with no matching member) replies with an `ERR`.
+### Sets
+
+| Command | Reply |
+|---|---|
+| `SADD key member [member ...]` | number of members newly added |
+| `SREM key member [member ...]` | number removed |
+| `SISMEMBER key member` | `1` or `0` |
+| `SMISMEMBER key member [member ...]` | array of `1`/`0`, one per member |
+| `SCARD key` | the member count |
+| `SMEMBERS key` | set of members |
+| `SPOP key [count]` | removes and returns one member or nil; with a count, a set |
+| `SRANDMEMBER key [count]` | the same without removing; a negative count may repeat members |
+| `SMOVE source destination member` | `1` if moved, else `0` |
+| `SINTER key [key ...]` / `SUNION ...` / `SDIFF ...` | set of members |
+| `SINTERSTORE dest key [key ...]` / `SUNIONSTORE ...` / `SDIFFSTORE ...` | size of the stored result |
+
+A missing key counts as an empty set. `SDIFF` subtracts every later set
+from the first, so it is not symmetric. A `STORE` variant whose result
+is empty deletes the destination.
+
+### Sorted sets
+
+| Command | Reply |
+|---|---|
+| `ZADD key score member [score member ...]` | number of members newly added |
+| `ZSCORE key member` | the score, or nil |
+| `ZMSCORE key member [member ...]` | array of scores, nil per missing member |
+| `ZINCRBY key increment member` | the new score (a missing member starts at 0) |
+| `ZREM key member [member ...]` | number removed |
+| `ZCARD key` | the member count |
+| `ZRANK key member` / `ZREVRANK key member` | the 0-based rank, or nil |
+| `ZRANGE key start stop [WITHSCORES]` | members ascending by score |
+| `ZREVRANGE key start stop [WITHSCORES]` | the same, descending |
+| `ZRANGEBYSCORE key min max [WITHSCORES]` | members inside the score window |
+| `ZREVRANGEBYSCORE key max min [WITHSCORES]` | the same, descending (bounds high-first) |
+| `ZCOUNT key min max` | how many fall inside the window |
+| `ZREMRANGEBYRANK key start stop` | number removed |
+| `ZREMRANGEBYSCORE key min max` | number removed |
+| `ZPOPMIN key [count]` / `ZPOPMAX key [count]` | the popped members with their scores |
+
+Score bounds accept a plain number, `-inf`/`+inf`, or a `(` prefix for
+an exclusive bound (`ZCOUNT board (75 +inf`).
+
+### Rules that apply everywhere
 
 A command against a key holding a different type replies
-`ERR WRONGTYPE ...` (e.g. `LPUSH` on a key created by `SET`). Popping or
-removing the last element of a collection deletes the key, same as Redis.
+`WRONGTYPE ...` (e.g. `LPUSH` on a key created by `SET`). Popping or
+removing the last element of a collection deletes the key, same as
+Redis.
 
-Values in `LPUSH`/`RPUSH`/`SADD` and members in `ZADD` are single
-whitespace-delimited tokens (no embedded spaces) — that's what makes
-multiple values per call unambiguous. `SET`/`HSET` values are still the
-rest of the line and may contain spaces, since those commands take
-exactly one value.
+Keys, values, fields, and members are arbitrary bytes: they may contain
+spaces, newlines, and NUL bytes.
 
 ## Project layout
 
@@ -180,45 +322,71 @@ Cargo.toml       - binary crate `klyro`; only dependency is `libc` (for poll())
 
 src/
   main.rs        - entry point: wires everything together
-  server.rs      - TCP networking + poll()-based event loop, connection I/O
-  commands.rs    - command-line parsing and dispatch
+  resp.rs        - the RESP protocol: reply encoding, request parsing
+  server.rs      - TCP networking + poll()-based event loop, RESP framing
+  config.rs      - the tunables, the config-file parser, CONFIG's get/set surface
+  stats.rs       - the counters INFO reports
+  commands/      - command parsing and dispatch, grouped by data type
+    mod.rs       -   the router plus reply helpers shared by the handlers
+    generic.rs   -   any-type keys: DEL/EXISTS/EXPIRE/RENAME/COPY/SCAN/...
+    string.rs    -   SET (with its option flags), the SETNX family, INCR*
+    list.rs      -   push/pop, LINDEX/LSET/LINSERT/LREM/LTRIM, LMOVE
+    hash.rs      -   HSET/HMSET/HMGET/HINCRBY/HKEYS/...
+    set.rs       -   membership plus the SINTER/SUNION/SDIFF algebra
+    zset.rs      -   ranks, score-range queries, ZINCRBY, the pops
+    server.rs    -   PING/ECHO/HELLO/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
   store.rs       - the keyspace: maps keys to typed values, with expiry
   persist.rs     - save/load the whole keyspace to a dump file
   app.rs         - bundles Store + Persist + the running flag shared by the above
-  types/         - the data type implementations
-    list.rs      -   List (a VecDeque<String> alias + Redis-style range())
-    hash.rs      -   Hash (a HashMap<String, String> alias)
-    set.rs       -   Set (a HashSet<String> alias)
+  types/         - the data type implementations, all byte-oriented
+    list.rs      -   List (a VecDeque<Bytes> alias + Redis-style range())
+    hash.rs      -   Hash (a HashMap<Bytes, Bytes> alias)
+    set.rs       -   Set (a HashSet<Bytes> alias)
     zset.rs      -   Sorted Set (members ordered by (score, member))
   util/          - generic infrastructure with no keyspace/protocol knowledge
-    strutil.rs   -   shared line-parsing helpers (used by commands + persist)
+    bytes.rs     -   the Bytes alias plus byte parsing/formatting helpers
     glob.rs      -   glob pattern matching (used by KEYS/SCAN)
+    rand.rs      -   xorshift PRNG (used by SPOP/SRANDMEMBER/RANDOMKEY)
+    memory.rs    -   counting global allocator (used by INFO memory)
+
+Dockerfile            - two-stage image build (static musl binary -> Alpine)
+docker-compose.yml    - one service, published port, named volume for /data
+docker-entrypoint.sh  - turns KLYRO_* env vars into Klyro's arguments
+docker-healthcheck.sh - PINGs the server on whatever port it bound
 
 tests/           - the integration suite (see "Test" above)
-  common/mod.rs  -  starts/stops a klyro subprocess, speaks its protocol
-  generic.rs     -  PING/DEL/EXPIRE/TTL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN
-  types.rs       -  String/List/Hash/Set/Zset ops, WRONGTYPE, empty-delete
-  multi.rs       -  multi-value LPUSH/RPUSH/SADD/ZADD
+  common/mod.rs  -  starts/stops a klyro subprocess, speaks RESP to it
+  protocol.rs    -  reply types, binary values, inline commands, pipelining
+  generic.rs     -  PING/DEL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN, WRONGTYPE
+  keyspace.rs    -  EXISTS/RENAME/COPY/RANDOMKEY/FLUSHDB
+  expiry.rs      -  EXPIRE/PEXPIRE/EXPIREAT/PTTL/PERSIST
+  strings.rs     -  SET option flags, SETNX/SETEX/GETSET/MGET/INCRBY
+  lists.rs       -  LINDEX/LSET/LINSERT/LREM/LTRIM/LMOVE, LPOP counts
+  hashes.rs      -  HSET/HMGET/HSETNX/HEXISTS/HKEYS/HINCRBY
+  sets.rs        -  SINTER/SUNION/SDIFF and STORE forms, SPOP, SMOVE
+  sortedsets.rs  -  ranks, score ranges, ZINCRBY, ZPOPMIN/MAX, ZREMRANGE*
   scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
-  persistence.rs -  save/kill/reload round-trip, TTL across a restart
-
-clients/         - official client libraries (see "Client libraries" above)
-  python/        - sync, stdlib `socket` only
-  node/          - async/Promise, TypeScript, zero runtime deps
-  go/            - stdlib `net` only
+  persistence.rs -  save/kill/reload round-trip, the version 1 dump format
+  admin.rs       -  INFO sections and counters, CONFIG, HELLO negotiation
 ```
 
 Each concern lives in its own module so new features can be added as new
 files without disturbing the others:
 
-- A new command → add a `match` arm in `commands.rs` (and a helper on
-  `Store` in `store.rs` if it needs new storage behavior).
+- A new tunable → add a field, a `get` arm, and a `set` arm in
+  `config.rs`, list its name in `PARAMETERS`, and read it where the
+  hardcoded value used to be. `CONFIG GET`/`SET` pick it up with no
+  further work.
+- A new command → add a `match` arm in the `src/commands/` module for
+  its data type, and list its name in the router in `commands/mod.rs`
+  (plus a helper on `Store` in `store.rs` if it needs new storage
+  behavior).
 - A new data type → add `src/types/<type>.rs` with its own storage +
   ops, add a `StoreType` variant + `get_or_create_*`/`get_existing_*`
   accessors in `store.rs` (the `define_collection_accessors!` macro
-  covers most of the boilerplate), wire commands for it into
-  `commands.rs`, and a case in `persist.rs`'s dump/load so it survives a
-  restart.
+  covers most of the boilerplate), add `src/commands/<type>.rs` and
+  route to it from `commands/mod.rs`, and add a case to `persist.rs`'s
+  dump/load so it survives a restart.
 - Pub/sub, replication, etc. → new modules alongside `server.rs`/
   `store.rs`, hooked in from `main.rs`.
 
@@ -237,27 +405,38 @@ tests.
 
 ## Persistence format
 
-The dump file is a simple text format (see `persist.rs`), byte-compatible
-with the original C implementation: a `KLYRO-DUMP 1` header line, then
-one record per key - `STRING key value`, or `LIST|HASH|SET|ZSET key
-count` followed by `count` data lines - plus an optional `EXPIREAT key
-unix-timestamp` line after a key's record if it has a TTL. Saves are
-atomic (written to `<path>.tmp`, then renamed over the real path), so a
-crash mid-save can't corrupt the existing dump.
+The dump file is length-prefixed, because a value may contain a newline:
+a `KLYRO-DUMP 2` header, then one record per key giving its type and
+absolute expiry, then each blob as its length followed by exactly that
+many bytes. Saves are atomic (written to `<path>.tmp`, then renamed over
+the real path), so a crash mid-save can't corrupt the existing dump.
+
+Version 1 dumps - the original whitespace-delimited text format - still
+load, so an existing dump survives the upgrade. They are rewritten as
+version 2 on the next save. See
+[docs/resp-protocol.md](docs/resp-protocol.md).
 
 ## Known limitations
 
-- Values can't contain `\n`, and a single reply is capped at 64 KiB.
-- No authentication; do not expose this on an untrusted network.
+See [docs/redis-feature-gap.md](docs/redis-feature-gap.md) for the full
+comparison against Redis. The ones worth knowing before you use this:
+
+- No transactions (`MULTI`/`EXEC`), pub/sub, scripting, or blocking
+  commands (`BLPOP`), so no queues and no server-side atomic
+  read-modify-write beyond what a single command does.
+- Only the 107 commands listed above. A client library will happily
+  call anything else and get back `ERR unknown command`.
+- No `maxmemory` or eviction policy: the dataset grows until the process
+  runs out of memory. `INFO memory` reports how much is in use, but
+  nothing acts on it.
+- No authentication, ACLs, or TLS; do not expose this on an untrusted
+  network.
 - Sorted Set range/lookup ops are O(n) (a sorted array, not a skip list) —
   fine at moderate scale, not built for huge sets.
 - Persistence is a full-keyspace snapshot (like Redis's RDB), not an
   append-only log — a `SIGKILL`/crash loses everything since the last
   save (on a normal exit, at most ~60s of changes).
-- `SETRANGE` pads gaps with ASCII spaces, not zero bytes like Redis —
-  kept for compatibility with the original C implementation's dump
-  format and observed behavior, though Rust's `String` has no trouble
-  representing an embedded `\0` byte.
-- `INCR`/`DECR`/`APPEND`/`SETRANGE` cap the resulting string at 64 KiB
-  and reply with an `ERR` past that, to keep a single `APPEND`/`SETRANGE`
-  loop from growing a value without bound.
+- RESP3 is negotiated but its push messages are unimplemented, because
+  there is no pub/sub or client-side caching to push.
+- `SCAN`'s cursor is a position in a sorted snapshot of the keyspace, so
+  each call costs O(n log n) rather than the O(1) a real `SCAN` gives.

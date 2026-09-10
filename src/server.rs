@@ -1,6 +1,11 @@
 //! TCP networking and the poll()-based event loop. A single-threaded
 //! model, same as the original C version: `Store` needs no
 //! synchronization since only one thread ever touches it.
+//!
+//! Framing is RESP. A connection's read buffer is handed to
+//! [`resp::parse_request`] until it stops yielding whole commands, and
+//! each reply is encoded straight into the write buffer, so several
+//! pipelined commands cost one read and one write.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -10,12 +15,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::app::App;
 use crate::commands;
+use crate::resp::{self, Protocol, Reply};
 
-const MAX_MSG: usize = 64 * 1024;
+/// How much to read from a socket at a time.
+const READ_CHUNK: usize = 16 * 1024;
 
 pub struct Conn {
     stream: TcpStream,
     want_close: bool,
+    /// Negotiated by HELLO, and RESP2 until then - the version every
+    /// client starts out speaking.
+    protocol: Protocol,
     rbuf: Vec<u8>,
     wbuf: Vec<u8>,
     wbuf_sent: usize,
@@ -26,25 +36,32 @@ impl Conn {
         Conn {
             stream,
             want_close: false,
+            protocol: Protocol::Resp2,
             rbuf: Vec::new(),
             wbuf: Vec::new(),
             wbuf_sent: 0,
         }
     }
 
-    /// Queues a reply on this connection's write buffer, truncating
-    /// silently past `MAX_MSG` pending bytes (matches the original's
-    /// fixed-size write buffer).
-    pub fn reply(&mut self, s: &str) {
-        let bytes = s.as_bytes();
-        let room = MAX_MSG.saturating_sub(self.wbuf.len());
-        let n = bytes.len().min(room);
-        self.wbuf.extend_from_slice(&bytes[..n]);
+    /// Queues one reply. Unlike the old line protocol, nothing is
+    /// truncated: a reply too large to buffer closes the connection
+    /// (see [`Conn::over_output_limit`]) rather than silently returning
+    /// a partial answer.
+    fn push(&mut self, reply: &Reply) {
+        resp::encode(reply, self.protocol, &mut self.wbuf);
+    }
+
+    fn over_output_limit(&self, limit: usize) -> bool {
+        self.wbuf.len() - self.wbuf_sent > limit
+    }
+
+    fn pending_output(&self) -> bool {
+        self.wbuf_sent < self.wbuf.len()
     }
 
     /// Marks this connection to be closed once its queued replies are
     /// flushed.
-    pub fn request_close(&mut self) {
+    fn request_close(&mut self) {
         self.want_close = true;
     }
 }
@@ -68,12 +85,13 @@ fn install_signal_handlers() {
     }
 }
 
-pub fn run(port: u16, app: &mut App) -> io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
+pub fn run(app: &mut App) -> io::Result<()> {
+    let (bind, port) = (app.config.bind.clone(), app.config.port);
+    let listener = TcpListener::bind((bind.as_str(), port))?;
     listener.set_nonblocking(true)?;
     install_signal_handlers();
 
-    println!("listening on port {}", port);
+    println!("listening on {}:{}", bind, port);
 
     let mut conns: HashMap<RawFd, Conn> = HashMap::new();
 
@@ -88,7 +106,7 @@ pub fn run(port: u16, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
-fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>) {
+fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>, app: &mut App) {
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -97,7 +115,17 @@ fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>) {
                 }
                 let _ = stream.set_nodelay(true);
                 let fd = stream.as_raw_fd();
-                conns.insert(fd, Conn::new(stream));
+                app.stats.total_connections += 1;
+
+                let mut conn = Conn::new(stream);
+                // Over the ceiling: say so and close, rather than
+                // dropping the connection without explanation.
+                if conns.len() >= app.config.maxclients {
+                    app.stats.rejected_connections += 1;
+                    conn.push(&Reply::error("ERR max number of clients reached"));
+                    conn.request_close();
+                }
+                conns.insert(fd, conn);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
             Err(e) => {
@@ -109,39 +137,65 @@ fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>) {
 }
 
 fn handle_read(conn: &mut Conn, app: &mut App) {
-    if conn.rbuf.len() >= MAX_MSG {
-        conn.reply("ERR line too long\r\n");
-        conn.rbuf.clear();
-        return;
-    }
-
-    let mut tmp = [0u8; MAX_MSG];
-    let remaining = MAX_MSG - conn.rbuf.len();
-    match conn.stream.read(&mut tmp[..remaining]) {
+    let mut chunk = [0u8; READ_CHUNK];
+    match conn.stream.read(&mut chunk) {
         Ok(0) => conn.want_close = true,
         Ok(n) => {
-            conn.rbuf.extend_from_slice(&tmp[..n]);
-            process_lines(conn, app);
+            conn.rbuf.extend_from_slice(&chunk[..n]);
+            process_requests(conn, app);
         }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
         Err(_) => conn.want_close = true,
     }
 }
 
-fn process_lines(conn: &mut Conn, app: &mut App) {
-    while let Some(nl_pos) = conn.rbuf.iter().position(|&b| b == b'\n') {
-        let line_bytes: Vec<u8> = conn.rbuf.drain(..=nl_pos).collect();
-        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
-        commands::dispatch(app, conn, &line);
+/// Drains every complete command sitting in the read buffer.
+fn process_requests(conn: &mut Conn, app: &mut App) {
+    let max_bulk = app.config.proto_max_bulk_len;
+    let output_limit = app.config.client_output_buffer_limit;
 
-        if conn.want_close {
+    loop {
+        match resp::parse_request(&conn.rbuf, max_bulk) {
+            // Not a whole command yet; wait for more bytes.
+            Ok(None) => break,
+            Ok(Some(request)) => {
+                conn.rbuf.drain(..request.consumed);
+                if let Some(response) = commands::dispatch(app, &request.argv) {
+                    // HELLO's own reply goes out in the version it
+                    // switched to, which is what clients expect.
+                    if let Some(protocol) = response.protocol {
+                        conn.protocol = protocol;
+                    }
+                    conn.push(&response.reply);
+                    if response.close {
+                        conn.request_close();
+                    }
+                }
+            }
+            Err(error) => {
+                // The parser can no longer tell where the next command
+                // starts, so the connection has to go.
+                conn.push(&Reply::error(error.0));
+                conn.request_close();
+                conn.rbuf.clear();
+                break;
+            }
+        }
+
+        if conn.want_close || conn.over_output_limit(output_limit) {
+            if conn.over_output_limit(output_limit) {
+                conn.push(&Reply::error(
+                    "ERR reply exceeds the client output buffer limit",
+                ));
+                conn.request_close();
+            }
             break;
         }
     }
 }
 
 fn handle_write(conn: &mut Conn) {
-    while conn.wbuf_sent < conn.wbuf.len() {
+    while conn.pending_output() {
         match conn.stream.write(&conn.wbuf[conn.wbuf_sent..]) {
             Ok(0) => {
                 conn.want_close = true;
@@ -177,7 +231,7 @@ fn poll_once(
         if !conn.want_close {
             events |= libc::POLLIN;
         }
-        if conn.wbuf_sent < conn.wbuf.len() {
+        if conn.pending_output() {
             events |= libc::POLLOUT;
         }
         fds.push(libc::pollfd {
@@ -198,7 +252,7 @@ fn poll_once(
     }
 
     if fds[0].revents & libc::POLLIN != 0 {
-        accept_new_conns(listener, conns);
+        accept_new_conns(listener, conns, app);
     }
 
     let mut to_close = Vec::new();
@@ -217,7 +271,7 @@ fn poll_once(
         if re & libc::POLLOUT != 0 {
             handle_write(conn);
         }
-        if conn.want_close && conn.wbuf_sent >= conn.wbuf.len() {
+        if conn.want_close && !conn.pending_output() {
             to_close.push(fd);
         }
     }
@@ -225,6 +279,7 @@ fn poll_once(
         conns.remove(&fd);
     }
 
+    app.stats.connected_clients = conns.len();
     app.tick();
     Ok(())
 }

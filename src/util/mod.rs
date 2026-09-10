@@ -1,2 +1,4 @@
+pub mod bytes;
 pub mod glob;
-pub mod strutil;
+pub mod memory;
+pub mod rand;

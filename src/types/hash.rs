@@ -1,7 +1,9 @@
 //! A field -> value map - the backing store for the Redis-style Hash
-//! data type. `std::collections::HashMap` replaces the hand-rolled
-//! FNV-1a chaining table the C version used.
+//! data type. Both halves are raw bytes, so a field or value may hold
+//! anything a client sends.
 
 use std::collections::HashMap;
 
-pub type Hash = HashMap<String, String>;
+use crate::util::bytes::Bytes;
+
+pub type Hash = HashMap<Bytes, Bytes>;

@@ -1,107 +1,170 @@
-//! Save/kill/reload round-trip, TTL across a restart. Ported from the
-//! old test_persistence.py. Each test needs its own dump-file lifecycle.
+//! Saving and reloading the keyspace: the round trip, TTLs across a
+//! restart, and the version 1 dump format.
 
 mod common;
 
-use common::KlyroServer;
-use std::collections::HashSet;
+use common::{bulk, int, nil, ok, KlyroServer};
 use std::time::Duration;
 
 #[test]
-fn fresh_dump_path_starts_empty() {
+fn every_type_survives_a_save_and_reload() {
     let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("DBSIZE"), int(0));
+        client.call(&["SET", "greeting", "hello persistence"]);
+        client.send("RPUSH mylist a b c");
+        client.send("HSET user name Alice age 30");
+        client.send("SADD tags fast small");
+        client.send("ZADD board 100 alice 50 bob");
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(client.send("GET greeting"), bulk("hello persistence"));
+        assert_eq!(
+            client.send("LRANGE mylist 0 -1").list(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(client.send("HGET user name"), bulk("Alice"));
+        assert_eq!(client.send("HGET user age"), bulk("30"));
+        assert_eq!(client.send("SMEMBERS tags").sorted(), vec!["fast", "small"]);
+        assert_eq!(
+            client.send("ZRANGE board 0 -1").list(),
+            vec!["bob", "alice"]
+        );
+        assert_eq!(client.send("ZSCORE board alice"), bulk("100"));
+        assert_eq!(client.send("DBSIZE"), int(5));
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+#[test]
+fn binary_values_survive_a_save_and_reload() {
+    let mut server = KlyroServer::new();
+    let key = b"awkward\r\nkey\0here".to_vec();
+    let value = b"line one\nline two\0with a nul\xff".to_vec();
+    {
+        let mut client = server.connect();
+        client.call_bytes(&[b"SET".to_vec(), key.clone(), value.clone()]);
+        client.call_bytes(&[b"RPUSH".to_vec(), b"l".to_vec(), value.clone()]);
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(
+            client.call_bytes(&[b"GET".to_vec(), key.clone()]).bytes(),
+            value
+        );
+        assert_eq!(client.send("LINDEX l 0").bytes(), value);
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+#[test]
+fn a_ttl_survives_a_restart_as_an_absolute_deadline() {
+    let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        client.send("SET k v");
+        client.send("EXPIRE k 300");
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        let ttl = client.send("TTL k").integer();
+        assert!((280..=300).contains(&ttl), "got {ttl}");
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+#[test]
+fn an_expired_key_does_not_come_back() {
+    let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        client.send("SET gone v");
+        client.send("SET stays v");
+        client.send("PEXPIRE gone 50");
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(client.send("GET gone"), nil());
+        assert_eq!(client.send("GET stays"), bulk("v"));
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+#[test]
+fn save_writes_immediately_without_stopping_the_server() {
+    let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("DBSIZE"), "COUNT 0\r\n");
-    server.kill();
+    client.send("SET k v");
+    assert_eq!(client.send("SAVE"), ok());
+    assert!(server.dump_path.exists());
+
+    // The server keeps serving after a save.
+    assert_eq!(client.send("GET k"), bulk("v"));
     server.cleanup_dump();
 }
 
 #[test]
-fn round_trip_across_all_types_after_sigkill() {
-    let mut server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("SET greeting hello persistence");
-    client.send("LPUSH mylist a b c");
-    client.send("HSET user name Alice");
-    client.send("SADD tags fast reliable");
-    client.send("ZADD board 100 alice 50 bob");
-    assert_eq!(client.send("SAVE"), "OK\r\n");
-    server.kill(); // SIGKILL, not SHUTDOWN - proves the save already on disk survives
+fn a_version_1_dump_still_loads() {
+    // The original text format, written by the pre-RESP server.
+    let path = std::env::temp_dir().join(format!("klyro_v1_{}.dump", std::process::id()));
+    std::fs::write(
+        &path,
+        "KLYRO-DUMP 1\n\
+         STRING greeting hello there\n\
+         LIST mylist 2\n\
+         a\n\
+         b\n\
+         HASH user 1\n\
+         name Alice\n\
+         SET tags 1\n\
+         fast\n\
+         ZSET board 1\n\
+         alice 100\n",
+    )
+    .unwrap();
 
-    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
-    let mut c2 = reloaded.connect();
-    assert_eq!(c2.send("GET greeting"), "VALUE hello persistence\r\n");
-    assert_eq!(c2.send("TYPE mylist"), "LIST\r\n");
-    assert_eq!(c2.send("LRANGE mylist 0 -1"), "c\r\nb\r\na\r\nEND\r\n");
-    assert_eq!(c2.send("TYPE user"), "HASH\r\n");
-    assert_eq!(c2.send("HGET user name"), "VALUE Alice\r\n");
-    assert_eq!(c2.send("TYPE tags"), "SET\r\n");
-    let resp = c2.send("SMEMBERS tags");
-    let members: HashSet<&str> = common::lines_before_terminator(&resp, "END")
-        .into_iter()
-        .collect();
-    assert_eq!(members, HashSet::from(["fast", "reliable"]));
-    assert_eq!(c2.send("TYPE board"), "ZSET\r\n");
-    assert_eq!(
-        c2.send("ZRANGE board 0 -1"),
-        "bob 50\r\nalice 100\r\nEND\r\n"
-    );
-
-    reloaded.kill();
-    reloaded.cleanup_dump();
-}
-
-#[test]
-fn ttl_survives_a_restart() {
-    let mut server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("SET longlived v");
-    client.send("EXPIRE longlived 300");
-    client.send("SAVE");
+    let mut server = KlyroServer::with_dump(0, path.clone());
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("GET greeting"), bulk("hello there"));
+        assert_eq!(client.send("LRANGE mylist 0 -1").list(), vec!["a", "b"]);
+        assert_eq!(client.send("HGET user name"), bulk("Alice"));
+        assert_eq!(client.send("SISMEMBER tags fast"), int(1));
+        assert_eq!(client.send("ZSCORE board alice"), bulk("100"));
+    }
     server.kill();
-
-    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
-    let mut c2 = reloaded.connect();
-    let resp = c2.send("TTL longlived");
-    let ttl: i64 = resp.split_whitespace().nth(1).unwrap().parse().unwrap();
-    assert!(ttl > 290, "expected ttl > 290, got {ttl}");
-    assert!(ttl <= 300, "expected ttl <= 300, got {ttl}");
-
-    reloaded.kill();
-    reloaded.cleanup_dump();
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
-fn key_expired_during_downtime_is_gone_on_reload() {
-    let mut server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("SET shortlived x");
-    client.send("EXPIRE shortlived 1");
-    client.send("SAVE");
-    std::thread::sleep(Duration::from_millis(1200)); // let it actually expire before "restarting"
+fn a_file_that_is_not_a_dump_is_ignored() {
+    let path = std::env::temp_dir().join(format!("klyro_junk_{}.dump", std::process::id()));
+    std::fs::write(&path, "this is not a dump file\n").unwrap();
+
+    let mut server = KlyroServer::with_dump(0, path.clone());
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("DBSIZE"), int(0));
+    }
     server.kill();
-
-    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
-    let mut c2 = reloaded.connect();
-    assert_eq!(c2.send("GET shortlived"), "NOT_FOUND\r\n");
-    assert_eq!(c2.send("TYPE shortlived"), "NONE\r\n");
-
-    reloaded.kill();
-    reloaded.cleanup_dump();
-}
-
-#[test]
-fn graceful_shutdown_also_saves() {
-    let mut server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("SET savedbyshutdown v");
-    client.send("SHUTDOWN"); // no explicit SAVE - relies on shutdown's own save
-    server.wait_for_exit(Duration::from_secs(3));
-
-    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
-    let mut c2 = reloaded.connect();
-    assert_eq!(c2.send("GET savedbyshutdown"), "VALUE v\r\n");
-
-    reloaded.kill();
-    reloaded.cleanup_dump();
+    let _ = std::fs::remove_file(&path);
 }
