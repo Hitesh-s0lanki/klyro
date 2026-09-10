@@ -16,7 +16,6 @@ use crate::store::{Store, StoreType};
 use crate::util::strutil::{format_g, next_token, parse_int, parse_long, trim};
 
 const DUMP_MAGIC: &str = "KLYRO-DUMP 1";
-const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct Persist {
     path: PathBuf,
@@ -207,12 +206,19 @@ impl Persist {
         }
     }
 
-    /// Writes the whole keyspace to the configured path (atomically, via
-    /// a temp file + rename). Safe to call any time - on shutdown, or
-    /// from the SAVE command.
-    pub fn save(&mut self, store: &mut Store) {
-        if let Err(e) = self.save_inner(store) {
-            eprintln!("persist_save: {}", e);
+    /// Writes the whole keyspace to `path`, atomically, by writing a
+    /// temp file and renaming it over the target. `path` becomes this
+    /// instance's path from now on, which is how `CONFIG SET
+    /// dbfilename` redirects the next save. Returns whether the write
+    /// succeeded.
+    pub fn save_to(&mut self, path: &str, store: &mut Store) -> bool {
+        self.path = PathBuf::from(path);
+        match self.save_inner(store) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("persist_save: {}", e);
+                false
+            }
         }
     }
 
@@ -257,7 +263,7 @@ impl Persist {
                 StoreType::Zset => {
                     if let Some(zset) = store.get_existing_zset(&key) {
                         writeln!(f, "ZSET {} {}", key, zset.size())?;
-                        for (member, score) in zset.range(0, -1) {
+                        for (member, score) in zset.iter() {
                             writeln!(f, "{} {}", member, format_g(score, 17))?;
                         }
                     }
@@ -276,22 +282,23 @@ impl Persist {
         Ok(())
     }
 
-    /// Call periodically from the event loop; autosaves if the store has
-    /// pending changes and the autosave interval has elapsed.
-    pub fn tick(&mut self, store: &mut Store) {
+    /// Whether `interval` has elapsed since the last check *and* the
+    /// store has unsaved changes. Advances the check clock as a side
+    /// effect, so the caller gets one `true` per interval rather than
+    /// one per tick.
+    pub fn autosave_due(&mut self, interval: Duration, store: &Store) -> bool {
         let now = Instant::now();
         match self.last_check {
             None => {
+                // Start the clock rather than firing immediately: at
+                // startup nothing has changed yet anyway.
                 self.last_check = Some(now);
-                return;
+                return false;
             }
-            Some(last) if now.duration_since(last) < AUTOSAVE_INTERVAL => return,
+            Some(last) if now.duration_since(last) < interval => return false,
             Some(_) => self.last_check = Some(now),
         }
-
-        if store.dirty_count() > 0 {
-            self.save(store);
-        }
+        store.dirty_count() > 0
     }
 }
 
@@ -341,7 +348,7 @@ mod tests {
         store.expire("greeting", 300);
 
         let mut persist = Persist::new(path.to_str().unwrap());
-        persist.save(&mut store);
+        assert!(persist.save_to(path.to_str().unwrap(), &mut store));
 
         let mut reloaded = Store::new();
         let persist2 = Persist::new(path.to_str().unwrap());

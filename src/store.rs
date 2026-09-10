@@ -31,6 +31,7 @@ impl StoreType {
     }
 }
 
+#[derive(Clone)]
 enum Value {
     Str(String),
     List(List),
@@ -64,6 +65,7 @@ impl Value {
     }
 }
 
+#[derive(Clone)]
 struct Entry {
     value: Value,
     expire_at: Option<SystemTime>, // None = never expires
@@ -72,6 +74,9 @@ struct Entry {
 pub struct Store {
     map: HashMap<String, Entry>,
     dirty: usize,
+    expired: u64,
+    lookup_hits: u64,
+    lookup_misses: u64,
 }
 
 impl Store {
@@ -79,6 +84,9 @@ impl Store {
         Store {
             map: HashMap::new(),
             dirty: 0,
+            expired: 0,
+            lookup_hits: 0,
+            lookup_misses: 0,
         }
     }
 
@@ -89,26 +97,81 @@ impl Store {
         }
     }
 
+    /// Drops `key` if its deadline has passed, so a lookup never sees a
+    /// stale entry. Shared by `find`/`find_mut`.
+    fn expire_if_due(&mut self, key: &str) {
+        let now = SystemTime::now();
+        if self.map.get(key).is_some_and(|e| !Self::is_live(e, now)) {
+            self.map.remove(key);
+            self.dirty += 1;
+            self.expired += 1;
+        }
+    }
+
+    /// Records whether a lookup found anything, for INFO's hit ratio.
+    fn account(&mut self, found: bool) {
+        if found {
+            self.lookup_hits += 1;
+        } else {
+            self.lookup_misses += 1;
+        }
+    }
+
     /// Finds a live (non-expired) entry for `key`, lazily erasing it if
     /// it has expired.
     fn find(&mut self, key: &str) -> Option<&Entry> {
-        let now = SystemTime::now();
-        let expired = self.map.get(key).is_some_and(|e| !Self::is_live(e, now));
-        if expired {
-            self.map.remove(key);
-            self.dirty += 1;
-        }
+        self.expire_if_due(key);
+        let found = self.map.contains_key(key);
+        self.account(found);
         self.map.get(key)
     }
 
     fn find_mut(&mut self, key: &str) -> Option<&mut Entry> {
-        let now = SystemTime::now();
-        let expired = self.map.get(key).is_some_and(|e| !Self::is_live(e, now));
-        if expired {
-            self.map.remove(key);
-            self.dirty += 1;
-        }
+        self.expire_if_due(key);
+        let found = self.map.contains_key(key);
+        self.account(found);
         self.map.get_mut(key)
+    }
+
+    /// Keyspace lookups so far, as (hits, misses). The dispatcher reads
+    /// the delta across a single command so it can attribute only
+    /// read-command lookups to INFO's counters.
+    pub fn lookup_counts(&self) -> (u64, u64) {
+        (self.lookup_hits, self.lookup_misses)
+    }
+
+    /// Keys removed because their TTL passed, whether by the periodic
+    /// sweep or lazily on lookup.
+    pub fn expired_count(&self) -> u64 {
+        self.expired
+    }
+
+    /// How many live keys carry an expiry, for INFO's keyspace line.
+    pub fn volatile_size(&self) -> usize {
+        let now = SystemTime::now();
+        self.map
+            .values()
+            .filter(|e| Self::is_live(e, now) && e.expire_at.is_some())
+            .count()
+    }
+
+    /// Live key counts broken down by type, in `StoreType` order.
+    pub fn type_breakdown(&self) -> Vec<(StoreType, usize)> {
+        let now = SystemTime::now();
+        let mut counts = [0usize; 5];
+        for entry in self.map.values().filter(|e| Self::is_live(e, now)) {
+            counts[entry.value.type_of() as usize] += 1;
+        }
+        [
+            StoreType::String,
+            StoreType::List,
+            StoreType::Hash,
+            StoreType::Set,
+            StoreType::Zset,
+        ]
+        .into_iter()
+        .map(|t| (t, counts[t as usize]))
+        .collect()
     }
 
     pub fn dirty_count(&self) -> usize {
@@ -119,15 +182,22 @@ impl Store {
         self.dirty = 0;
     }
 
-    /// Part of the generic key-operations API (kept for parity with the
-    /// original), unused by any command today.
-    #[allow(dead_code)]
     pub fn exists(&mut self, key: &str) -> bool {
         self.find(key).is_some()
     }
 
+    /// The type `key` holds, counted as a keyspace lookup. For the
+    /// TYPE command and anything else a user asked for directly.
     pub fn type_of(&mut self, key: &str) -> Option<StoreType> {
         self.find(key).map(|e| e.value.type_of())
+    }
+
+    /// The same answer, without touching the hit/miss counters. For
+    /// internal type checks, which would otherwise make every read
+    /// command look like two keyspace lookups instead of one.
+    pub fn peek_type(&mut self, key: &str) -> Option<StoreType> {
+        self.expire_if_due(key);
+        self.map.get(key).map(|e| e.value.type_of())
     }
 
     pub fn del(&mut self, key: &str) -> bool {
@@ -151,10 +221,16 @@ impl Store {
     }
 
     pub fn expire(&mut self, key: &str, seconds: i64) -> bool {
-        let expire_at = expire_at_from_secs(seconds);
+        self.set_expire_at(key, Some(expire_at_from_secs(seconds)))
+    }
+
+    /// Sets (or with `None`, clears) `key`'s expiry deadline. Returns
+    /// `false` if the key doesn't exist. Backs EXPIRE, PEXPIRE,
+    /// EXPIREAT, PEXPIREAT, PERSIST, and SET's EX/PX options.
+    pub fn set_expire_at(&mut self, key: &str, at: Option<SystemTime>) -> bool {
         match self.find_mut(key) {
             Some(e) => {
-                e.expire_at = Some(expire_at);
+                e.expire_at = at;
                 self.dirty += 1;
                 true
             }
@@ -162,24 +238,90 @@ impl Store {
         }
     }
 
+    /// Whether `key` currently has an expiry set. `false` if missing.
+    pub fn has_expiry(&mut self, key: &str) -> bool {
+        self.find(key).is_some_and(|e| e.expire_at.is_some())
+    }
+
     /// -2 missing, -1 no expiry, else seconds left.
     pub fn ttl(&mut self, key: &str) -> i64 {
+        match self.pttl_ms(key) {
+            n if n < 0 => n,
+            ms => ms / 1000,
+        }
+    }
+
+    /// -2 missing, -1 no expiry, else milliseconds left.
+    pub fn pttl_ms(&mut self, key: &str) -> i64 {
         match self.find(key) {
             None => -2,
             Some(e) => match e.expire_at {
                 None => -1,
                 Some(t) => match t.duration_since(SystemTime::now()) {
-                    Ok(d) => d.as_secs() as i64,
+                    Ok(d) => d.as_millis() as i64,
                     Err(_) => 0,
                 },
             },
         }
     }
 
-    /// Raw key count, including any not-yet-swept expired keys (matches
-    /// the original's DBSIZE, which never filtered on expiry either).
+    /// Moves `key` to `new_key`, replacing whatever was there and
+    /// carrying the TTL across. `false` if `key` doesn't exist.
+    pub fn rename(&mut self, key: &str, new_key: &str) -> bool {
+        if self.find(key).is_none() {
+            return false;
+        }
+        if key == new_key {
+            return true;
+        }
+        let entry = self.map.remove(key).expect("find() proved it is live");
+        self.map.insert(new_key.to_string(), entry);
+        self.dirty += 1;
+        true
+    }
+
+    /// Deep-copies `key` to `dest` (TTL included). `None` if `key` is
+    /// missing, `Some(false)` if `dest` already exists and `replace` is
+    /// unset, `Some(true)` on success.
+    pub fn copy(&mut self, key: &str, dest: &str, replace: bool) -> Option<bool> {
+        self.find(key)?;
+        if !replace && self.exists(dest) {
+            return Some(false);
+        }
+        let entry = self.map.get(key).expect("find() proved it is live").clone();
+        self.map.insert(dest.to_string(), entry);
+        self.dirty += 1;
+        Some(true)
+    }
+
+    /// Drops every key. Returns how many were removed.
+    pub fn flush(&mut self) -> usize {
+        let removed = self.map.len();
+        self.map.clear();
+        self.dirty += 1;
+        removed
+    }
+
+    /// Some live key chosen pseudo-randomly, or `None` if empty.
+    pub fn random_key(&mut self) -> Option<String> {
+        let now = SystemTime::now();
+        let live: Vec<&String> = self
+            .map
+            .iter()
+            .filter(|(_, e)| Self::is_live(e, now))
+            .map(|(k, _)| k)
+            .collect();
+        if live.is_empty() {
+            return None;
+        }
+        Some(live[crate::util::rand::below(live.len())].clone())
+    }
+
+    /// Live key count, skipping any expired-but-not-yet-swept entries so
+    /// DBSIZE always agrees with what KEYS would return.
     pub fn size(&self) -> usize {
-        self.map.len()
+        let now = SystemTime::now();
+        self.map.values().filter(|e| Self::is_live(e, now)).count()
     }
 
     pub fn sweep_expired(&mut self) {
@@ -193,6 +335,7 @@ impl Store {
         for key in expired {
             self.map.remove(&key);
             self.dirty += 1;
+            self.expired += 1;
         }
     }
 

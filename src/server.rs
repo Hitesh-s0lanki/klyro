@@ -68,12 +68,13 @@ fn install_signal_handlers() {
     }
 }
 
-pub fn run(port: u16, app: &mut App) -> io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
+pub fn run(app: &mut App) -> io::Result<()> {
+    let (bind, port) = (app.config.bind.clone(), app.config.port);
+    let listener = TcpListener::bind((bind.as_str(), port))?;
     listener.set_nonblocking(true)?;
     install_signal_handlers();
 
-    println!("listening on port {}", port);
+    println!("listening on {}:{}", bind, port);
 
     let mut conns: HashMap<RawFd, Conn> = HashMap::new();
 
@@ -88,7 +89,7 @@ pub fn run(port: u16, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
-fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>) {
+fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>, app: &mut App) {
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -97,7 +98,17 @@ fn accept_new_conns(listener: &TcpListener, conns: &mut HashMap<RawFd, Conn>) {
                 }
                 let _ = stream.set_nodelay(true);
                 let fd = stream.as_raw_fd();
-                conns.insert(fd, Conn::new(stream));
+                app.stats.total_connections += 1;
+
+                let mut conn = Conn::new(stream);
+                // Over the ceiling: say so and close, rather than
+                // dropping the connection without explanation.
+                if conns.len() >= app.config.maxclients {
+                    app.stats.rejected_connections += 1;
+                    conn.reply("ERR max number of clients reached\r\n");
+                    conn.request_close();
+                }
+                conns.insert(fd, conn);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
             Err(e) => {
@@ -198,7 +209,7 @@ fn poll_once(
     }
 
     if fds[0].revents & libc::POLLIN != 0 {
-        accept_new_conns(listener, conns);
+        accept_new_conns(listener, conns, app);
     }
 
     let mut to_close = Vec::new();
@@ -225,6 +236,7 @@ fn poll_once(
         conns.remove(&fd);
     }
 
+    app.stats.connected_clients = conns.len();
     app.tick();
     Ok(())
 }

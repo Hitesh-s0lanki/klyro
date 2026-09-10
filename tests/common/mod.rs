@@ -63,6 +63,9 @@ impl KlyroClient {
 pub struct KlyroServer {
     pub port: u16,
     pub dump_path: PathBuf,
+    /// Set only when the server was started from a config file, so
+    /// `Drop` can clean the file up.
+    config_path: Option<PathBuf>,
     child: Option<Child>,
 }
 
@@ -81,6 +84,64 @@ impl KlyroServer {
         Self::spawn(port, dump_path)
     }
 
+    /// Starts a server from a generated config file holding `settings`
+    /// (one `name value` per line). The port and dump path are filled
+    /// in automatically, so a test only writes the lines it cares
+    /// about.
+    pub fn with_config(settings: &str) -> Self {
+        let port = free_port();
+        let dump_path = std::env::temp_dir().join(format!("klyro_test_{port}.dump"));
+        remove_if_exists(&dump_path);
+        let config_path = std::env::temp_dir().join(format!("klyro_test_{port}.conf"));
+        std::fs::write(
+            &config_path,
+            format!(
+                "port {}\ndbfilename {}\n{}\n",
+                port,
+                dump_path.display(),
+                settings
+            ),
+        )
+        .expect("write the test config file");
+
+        let mut server = Self::spawn_with_args(
+            &[config_path.to_string_lossy().into_owned()],
+            port,
+            dump_path,
+        );
+        server.config_path = Some(config_path);
+        server
+    }
+
+    /// Runs the binary with `args` and waits for it to accept
+    /// connections on `port`. Returns the process's captured output
+    /// instead of panicking if it exits early, so a test can assert on
+    /// a startup failure.
+    pub fn try_spawn_with_args(args: &[String]) -> Result<Child, String> {
+        let bin = env!("CARGO_BIN_EXE_klyro");
+        let mut child = Command::new(bin)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn the klyro binary");
+
+        // Poll rather than sleeping a fixed span: under `cargo test`'s
+        // parallel threads a process can take a while just to start.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if child.try_wait().expect("try_wait").is_some() {
+                let mut out = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut out);
+                }
+                return Err(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(child)
+    }
+
     /// Starts a fresh server (on a newly picked port) against an
     /// existing dump file - simulating a restart that reloads it.
     pub fn reload(dump_path: PathBuf) -> Self {
@@ -88,10 +149,14 @@ impl KlyroServer {
     }
 
     fn spawn(port: u16, dump_path: PathBuf) -> Self {
+        let args = vec![port.to_string(), dump_path.to_string_lossy().into_owned()];
+        Self::spawn_with_args(&args, port, dump_path)
+    }
+
+    fn spawn_with_args(args: &[String], port: u16, dump_path: PathBuf) -> Self {
         let bin = env!("CARGO_BIN_EXE_klyro");
         let mut child = Command::new(bin)
-            .arg(port.to_string())
-            .arg(&dump_path)
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -115,6 +180,7 @@ impl KlyroServer {
         KlyroServer {
             port,
             dump_path,
+            config_path: None,
             child: Some(child),
         }
     }
@@ -194,6 +260,9 @@ impl KlyroServer {
 impl Drop for KlyroServer {
     fn drop(&mut self) {
         self.kill();
+        if let Some(path) = &self.config_path {
+            remove_if_exists(path);
+        }
     }
 }
 

@@ -1,0 +1,58 @@
+# Klyro configuration file.
+#
+# Copy this to klyro.conf and start the server with:
+#
+#     klyro klyro.conf
+#
+# Format: one `name value` pair per line. Everything after a `#` is a
+# comment. Blank lines are ignored. Every value below is the default,
+# so an empty file behaves exactly like no file at all.
+#
+# Every parameter here is also readable at runtime with
+# `CONFIG GET <name>`, and all but `bind` and `port` can be changed with
+# `CONFIG SET <name> <value>` without a restart.
+
+# ----- network -----------------------------------------------------
+
+# Address to listen on. 0.0.0.0 accepts from anywhere; use 127.0.0.1 to
+# accept only local connections. Klyro has no authentication, so do not
+# expose it on an untrusted network.
+bind 0.0.0.0
+
+# Port to listen on.
+port 7171
+
+# Connections allowed at once. Past this, a new connection is told
+# `ERR max number of clients reached` and closed; INFO's
+# rejected_connections counts how often that has happened.
+maxclients 10000
+
+# ----- persistence -------------------------------------------------
+
+# Where the keyspace snapshot is written. Loaded at startup if it
+# exists. Changing this at runtime redirects the next save and leaves
+# the current file alone.
+dbfilename klyro.dump
+
+# Seconds between autosave checks. A save happens on a check only if
+# something changed since the last one. A crash loses at most this much
+# work, so lower it if that matters more than the write cost.
+save-interval 60
+
+# ----- keyspace ----------------------------------------------------
+
+# Milliseconds between active sweeps for expired keys. Expired keys are
+# also removed lazily whenever they are looked up, so this only bounds
+# how long an untouched expired key keeps holding memory.
+sweep-interval 1000
+
+# Largest string a value may grow to, in bytes. Enforced by APPEND and
+# SETRANGE, which reply `ERR resulting string too long` rather than
+# growing past it.
+max-string-bytes 65536
+
+# The COUNT a SCAN uses when the caller doesn't give one.
+scan-default-count 10
+
+# Most score/member pairs one ZADD may carry.
+zadd-max-pairs 128

@@ -30,6 +30,24 @@ pub fn next_token<'a>(rest: &mut &'a str) -> Option<&'a str> {
     }
 }
 
+/// Every whitespace-delimited token in `s`, paired with the byte offset
+/// it starts at. The offsets let a caller slice the original line back
+/// out verbatim (keeping any internal runs of spaces), which
+/// `next_token` alone can't do because it collapses them.
+pub fn tokens_with_offsets(s: &str) -> Vec<(usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut offset = 0;
+    let mut rest = s;
+    while let Some(token) = next_token(&mut rest) {
+        // `next_token` consumed the token plus any spaces after it, so
+        // the remaining length tells us where we now are.
+        let start = offset;
+        offset = s.len() - rest.len();
+        tokens.push((start, &s[start..start + token.len()]));
+    }
+    tokens
+}
+
 pub fn parse_int(s: &str) -> Option<i32> {
     parse_long(s).map(|v| v as i32)
 }
@@ -111,6 +129,17 @@ mod tests {
         assert_eq!(next_token(&mut rest), Some("c"));
         assert_eq!(rest, "");
         assert_eq!(next_token(&mut rest), None);
+    }
+
+    #[test]
+    fn tokens_with_offsets_points_back_into_the_original() {
+        let line = "SET  key   hello  world";
+        let tokens = tokens_with_offsets(line);
+        let names: Vec<&str> = tokens.iter().map(|(_, t)| *t).collect();
+        assert_eq!(names, vec!["SET", "key", "hello", "world"]);
+        // Slicing at a token's offset recovers the rest of the line
+        // with its original spacing intact.
+        assert_eq!(&line[tokens[2].0..], "hello  world");
     }
 
     #[test]
