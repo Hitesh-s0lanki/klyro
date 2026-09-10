@@ -158,10 +158,6 @@ impl Filter {
         self.clauses.push(clause);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.clauses.is_empty()
-    }
-
     pub fn matches(&self, record: &MemoryRecord, now: SystemTime) -> bool {
         record.is_live(now) && self.clauses.iter().all(|c| c.matches(record))
     }

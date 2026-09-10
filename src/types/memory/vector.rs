@@ -125,14 +125,6 @@ impl VectorIndex {
         }
     }
 
-    pub fn dim(&self) -> usize {
-        self.dim
-    }
-
-    pub fn metric(&self) -> Metric {
-        self.metric
-    }
-
     pub fn len(&self) -> usize {
         self.live
     }
@@ -220,6 +212,12 @@ impl VectorIndex {
     pub fn get(&self, slot: usize) -> Option<&[f32]> {
         let at = slot.checked_mul(self.dim)?;
         self.data.get(at..at + self.dim)
+    }
+
+    /// Comparisons a full scan of this index would cost, so a caller
+    /// can refuse a query before running it rather than during.
+    pub fn scan_cost(&self) -> usize {
+        self.live
     }
 
     /// How well `query` matches the vector in `slot`, higher being

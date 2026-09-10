@@ -141,6 +141,9 @@ const READ_COMMANDS: &[&str] = &[
     "MEM.CARD",
     "MEM.INFO",
     "MEM.SEARCH",
+    "MEM.VSEARCH",
+    "MEM.QUERY",
+    "MEM.SCAN",
 ];
 
 /// Executes one already-parsed command.

@@ -17,10 +17,11 @@ use crate::app::App;
 use crate::resp::Reply;
 use crate::store::StoreType;
 use crate::types::memory::filter::{Clause, Field, Filter, Op};
+use crate::types::memory::fuse::Fusion;
 use crate::types::memory::record::MemoryRecord;
 use crate::types::memory::vector::{encode_le_f32, parse_le_f32, Metric, VectorError};
 use crate::types::memory::{
-    unix_millis, AddRequest, Memory, MemoryConfig, MemoryError, Mode, Weights,
+    unix_millis, AddRequest, Hit, Memory, MemoryConfig, MemoryError, Mode, Weights,
 };
 use crate::util::bytes::{eq_ignore_case, to_display, Bytes};
 
@@ -54,6 +55,10 @@ fn describe(error: MemoryError) -> Reply {
             "ERR a VECTOR-mode index needs a vector on every record".to_string()
         }
         MemoryError::NoSuchRecord => "ERR no such record".to_string(),
+        MemoryError::TooLargeToScan { records, limit } => format!(
+            "ERR a scan of {} vectors exceeds mem-max-scan ({}); raise it or narrow the query with FILTER",
+            records, limit
+        ),
         MemoryError::ExistenceUnmet => "ERR record existence condition not met".to_string(),
         MemoryError::Full { limit } => {
             format!("ERR memory index is full at mem-max-records ({})", limit)
@@ -180,6 +185,70 @@ fn read_filter_clause(args: &mut Args, filter: &mut Filter) -> Checked<bool> {
     Ok(true)
 }
 
+/// The options every retrieval command shares.
+struct Retrieval {
+    topk: usize,
+    /// How many candidates each index contributes. Above `topk`,
+    /// because fusion can only reorder what it is given.
+    candidates: usize,
+    filter: Filter,
+    returns: Returns,
+}
+
+impl Retrieval {
+    fn new(app: &App) -> Retrieval {
+        Retrieval {
+            topk: 10,
+            candidates: app.config.mem_max_candidates.max(10),
+            filter: Filter::default(),
+            returns: Returns::default(),
+        }
+    }
+
+    /// Consumes one shared option, or reports the word that isn't one.
+    fn read(&mut self, args: &mut Args, app: &App) -> Checked<()> {
+        if args.take("TOPK") {
+            let n = parse_int(args.value()?)?;
+            if n < 1 || n as usize > app.config.mem_max_topk {
+                return Err(Reply::error(format!(
+                    "ERR TOPK must be between 1 and mem-max-topk ({})",
+                    app.config.mem_max_topk
+                )));
+            }
+            self.topk = n as usize;
+            self.candidates = app.config.mem_max_candidates.max(self.topk);
+            return Ok(());
+        }
+        if self.returns.read(args) || read_filter_clause(args, &mut self.filter)? {
+            return Ok(());
+        }
+        Err(args.unexpected())
+    }
+}
+
+/// Renders a ranked result set. `score` sits right after `id` so the
+/// two fields a caller always reads come first.
+fn hits_reply(memory: &Memory, hits: Vec<Hit>, topk: usize, returns: Returns) -> Reply {
+    let replies = hits
+        .into_iter()
+        .take(topk)
+        .filter_map(|hit| {
+            let record = memory.get(&hit.id)?;
+            let Reply::Map(mut fields) = record_reply(memory, record, returns) else {
+                return None;
+            };
+            fields.insert(1, (Reply::bulk("score"), double(hit.score)));
+            if returns.scores {
+                fields.push((Reply::bulk("keyword_score"), double(hit.keyword)));
+                fields.push((Reply::bulk("vector_score"), double(hit.vector)));
+                fields.push((Reply::bulk("recency_score"), double(hit.recency)));
+            }
+            Some(Reply::Map(fields))
+        })
+        .collect();
+    Reply::array(replies)
+}
+
 /// Which parts of a record a reply should carry.
 #[derive(Default, Clone, Copy)]
 struct Returns {
@@ -278,6 +347,8 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "MEM.EXPIRE" => expire(app, argv),
         "MEM.SCAN" => scan(app, argv),
         "MEM.SEARCH" => search(app, argv),
+        "MEM.VSEARCH" => vsearch(app, argv),
+        "MEM.QUERY" => query(app, argv),
         _ => Ok(Reply::error("ERR unknown command")),
     }
 }
@@ -666,53 +737,126 @@ fn scan(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
 
 fn search(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     min_args(argv, "MEM.SEARCH", 2)?;
-    let mut topk = 10usize;
-    let mut filter = Filter::default();
-    let mut returns = Returns::default();
+    // The query is argv[2]; options follow it.
+    let mut options = Retrieval::new(app);
     let mut args = Args { argv, at: 3 };
-
     while !args.done() {
-        if args.take("TOPK") {
-            let n = parse_int(args.value()?)?;
-            if n < 1 || n as usize > app.config.mem_max_topk {
-                return Err(Reply::error(format!(
-                    "ERR TOPK must be between 1 and mem-max-topk ({})",
-                    app.config.mem_max_topk
-                )));
-            }
-            topk = n as usize;
-        } else if returns.read(&mut args) {
-            continue;
-        } else if !read_filter_clause(&mut args, &mut filter)? {
-            return Err(args.unexpected());
-        }
+        options.read(&mut args, app)?;
     }
 
     let max_terms = app.config.mem_max_terms_per_doc;
-    // Candidates are gathered above TOPK so a later ranking stage has
-    // something to reorder; a keyword-only search then just truncates.
-    let candidates = app.config.mem_max_candidates.max(topk);
     let memory = index(app, &argv[1])?;
-    let hits = match memory.search_text(&argv[2], candidates, &filter, max_terms) {
-        Ok(hits) => hits,
-        Err(e) => return Err(describe(e)),
-    };
+    let hits = memory
+        .search_text(&argv[2], options.candidates, &options.filter, max_terms)
+        .map_err(describe)?;
 
-    let replies = hits
+    let hits: Vec<Hit> = hits
         .into_iter()
-        .take(topk)
-        .filter_map(|(id, score)| {
-            let record = memory.get(&id)?;
-            let mut fields = match record_reply(memory, record, returns) {
-                Reply::Map(fields) => fields,
-                other => return Some(other),
-            };
-            fields.insert(1, (Reply::bulk("score"), double(score)));
-            if returns.scores {
-                fields.push((Reply::bulk("keyword_score"), double(score)));
-            }
-            Some(Reply::Map(fields))
+        .map(|(id, score)| Hit {
+            id,
+            score,
+            keyword: score,
+            vector: 0.0,
+            recency: 0.0,
         })
         .collect();
-    Ok(Reply::array(replies))
+    Ok(hits_reply(memory, hits, options.topk, options.returns))
+}
+
+fn vsearch(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
+    min_args(argv, "MEM.VSEARCH", 2)?;
+    let mut options = Retrieval::new(app);
+    let mut args = Args::new(argv);
+    let mut vector = None;
+    while !args.done() {
+        match read_vector(&mut args)? {
+            Some(values) => vector = Some(values),
+            None => options.read(&mut args, app)?,
+        }
+    }
+    let Some(mut vector) = vector else {
+        return Err(Reply::error("ERR VEC or FVEC is required"));
+    };
+
+    let max_scan = app.config.mem_max_scan;
+    let memory = index(app, &argv[1])?;
+    // Under cosine both sides must be unit length, and the stored side
+    // already is.
+    memory.prepare_query_vector(&mut vector);
+    let hits = memory
+        .search_vector(&vector, options.candidates, &options.filter, max_scan)
+        .map_err(describe)?;
+    let hits: Vec<Hit> = hits
+        .into_iter()
+        .map(|(id, score)| Hit {
+            id,
+            score,
+            keyword: 0.0,
+            vector: score,
+            recency: 0.0,
+        })
+        .collect();
+    Ok(hits_reply(memory, hits, options.topk, options.returns))
+}
+
+fn query(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
+    min_args(argv, "MEM.QUERY", 1)?;
+    let mut options = Retrieval::new(app);
+    let mut text: Option<Bytes> = None;
+    let mut vector: Option<Vec<f32>> = None;
+    let mut weights: Option<Weights> = None;
+    let mut fusion = Fusion::Linear;
+
+    let mut args = Args::new(argv);
+    while !args.done() {
+        if args.take("TEXT") {
+            text = Some(args.value()?.to_vec());
+        } else if args.take("WEIGHTS") {
+            let words = args.values(4)?;
+            let mut parsed = [0f32; 4];
+            for (slot, word) in parsed.iter_mut().zip(words) {
+                *slot = parse_float(word)? as f32;
+            }
+            let candidate = Weights {
+                keyword: parsed[0],
+                vector: parsed[1],
+                recency: parsed[2],
+                importance: parsed[3],
+            };
+            if !candidate.is_valid() {
+                return Err(Reply::error("ERR WEIGHTS must be finite and non-negative"));
+            }
+            weights = Some(candidate);
+        } else if args.take("FUSION") {
+            fusion = Fusion::parse(args.value()?).ok_or_else(syntax_error)?;
+        } else {
+            match read_vector(&mut args)? {
+                Some(values) => vector = Some(values),
+                None => options.read(&mut args, app)?,
+            }
+        }
+    }
+
+    if text.is_none() && vector.is_none() {
+        return Err(Reply::error("ERR TEXT, VEC, or FVEC is required"));
+    }
+
+    let (max_terms, max_scan) = (app.config.mem_max_terms_per_doc, app.config.mem_max_scan);
+    let memory = index(app, &argv[1])?;
+    if let Some(values) = vector.as_mut() {
+        memory.prepare_query_vector(values);
+    }
+    let hits = memory
+        .query(
+            text.as_deref(),
+            vector.as_deref(),
+            options.candidates,
+            &options.filter,
+            weights.unwrap_or(memory.config().weights),
+            fusion,
+            max_terms,
+            max_scan,
+        )
+        .map_err(describe)?;
+    Ok(hits_reply(memory, hits, options.topk, options.returns))
 }

@@ -20,6 +20,7 @@
 //! ```
 
 pub mod filter;
+pub mod fuse;
 pub mod record;
 pub mod text;
 pub mod vector;
@@ -29,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::bytes::{eq_ignore_case, Bytes};
 use filter::Filter;
+use fuse::{fuse, Fusion};
 use record::MemoryRecord;
 use text::TextIndex;
 use vector::{Metric, VectorIndex, VectorError};
@@ -158,6 +160,10 @@ pub enum MemoryError {
     VectorRequired,
     Vector(VectorError),
     NoSuchRecord,
+    /// A brute-force scan of this index would exceed `mem-max-scan`.
+    /// Refused rather than answered from part of the index, because a
+    /// silently partial answer is worse than none.
+    TooLargeToScan { records: usize, limit: usize },
     /// `NX` was given and the id exists, or `XX` and it does not.
     ExistenceUnmet,
     /// `mem-max-records` would be exceeded.
@@ -186,6 +192,8 @@ pub struct AddRequest {
 
 /// One ranked result, with the components that produced its score kept
 /// separate so `WITHSCORES` can show the client why it ranked there.
+/// Importance is not among them: it is a stored field of the record,
+/// which every reply already carries.
 #[derive(Clone, Debug)]
 pub struct Hit {
     pub id: Bytes,
@@ -193,7 +201,6 @@ pub struct Hit {
     pub keyword: f32,
     pub vector: f32,
     pub recency: f32,
-    pub importance: f32,
 }
 
 pub struct Memory {
@@ -204,8 +211,6 @@ pub struct Memory {
     /// Backs server-assigned ids. Monotonic for the life of the index,
     /// and persisted, so a reloaded index never reissues an id.
     next_id: u64,
-    /// Bumped by every mutation, for `MEM.INFO`.
-    revision: u64,
 }
 
 impl Memory {
@@ -217,7 +222,6 @@ impl Memory {
             text: TextIndex::new(),
             vectors,
             next_id: 1,
-            revision: 0,
         }
     }
 
@@ -227,20 +231,14 @@ impl Memory {
 
     pub fn set_weights(&mut self, weights: Weights) {
         self.config.weights = weights;
-        self.revision += 1;
     }
 
     pub fn set_half_life(&mut self, half_life: Duration) {
         self.config.half_life = half_life;
-        self.revision += 1;
     }
 
     pub fn len(&self) -> usize {
         self.records.len()
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision
     }
 
     pub fn term_count(&self) -> usize {
@@ -274,13 +272,6 @@ impl Memory {
     /// unit length.
     pub fn prepare_query_vector(&self, values: &mut [f32]) {
         self.vectors.prepare(values);
-    }
-
-    pub fn validate_vector(&self, values: &[f32]) -> Result<(), MemoryError> {
-        if !self.config.mode.stores_vectors() {
-            return Err(MemoryError::VectorsNotSupported);
-        }
-        Ok(self.vectors.validate(values)?)
     }
 
     /// Ids in sorted order. Used by `MEM.SCAN`, which pages through a
@@ -383,7 +374,6 @@ impl Memory {
                 .index(&id, previous.as_deref(), &updated.text, max_terms);
         }
         self.records.insert(id.clone(), updated);
-        self.revision += 1;
         Ok(id)
     }
 
@@ -398,7 +388,6 @@ impl Memory {
         if let Some(slot) = record.slot {
             self.vectors.remove(slot);
         }
-        self.revision += 1;
         true
     }
 
@@ -414,7 +403,6 @@ impl Memory {
             .filter(|(field, value)| record.set_meta(field.clone(), value.clone()))
             .count();
         record.updated_at = now;
-        self.revision += 1;
         Ok(added)
     }
 
@@ -427,7 +415,6 @@ impl Memory {
             .ok_or(MemoryError::NoSuchRecord)?;
         let removed = fields.iter().filter(|f| record.remove_meta(f)).count();
         record.updated_at = now;
-        self.revision += 1;
         Ok(removed)
     }
 
@@ -441,7 +428,6 @@ impl Memory {
             .filter(|r| r.is_live(now))
             .ok_or(MemoryError::NoSuchRecord)?;
         record.expire_at = ttl.map(|d| now + d);
-        self.revision += 1;
         Ok(())
     }
 
@@ -473,6 +459,97 @@ impl Memory {
             self.del(id, max_terms);
         }
         dead.len()
+    }
+
+    /// Brute-force top-k over the vector index.
+    ///
+    /// Exact, not approximate. At 384 dimensions a hundred thousand
+    /// records is a few milliseconds of contiguous scanning, which is
+    /// the right trade before there is a workload to tune against - and
+    /// an exact scan is the reference an approximate index gets
+    /// checked against later.
+    ///
+    /// The cap matters more than it looks: Klyro is single-threaded, so
+    /// an unbounded scan stalls every other client on the server.
+    pub fn search_vector(
+        &self,
+        query: &[f32],
+        limit: usize,
+        filter: &Filter,
+        max_scan: usize,
+    ) -> Result<Vec<(Bytes, f32)>, MemoryError> {
+        if !self.config.mode.stores_vectors() {
+            return Err(MemoryError::VectorsNotSupported);
+        }
+        if query.len() != self.config.dim {
+            return Err(MemoryError::Vector(VectorError::WrongDimension {
+                expected: self.config.dim,
+                got: query.len(),
+            }));
+        }
+        if self.vectors.scan_cost() > max_scan {
+            return Err(MemoryError::TooLargeToScan {
+                records: self.vectors.scan_cost(),
+                limit: max_scan,
+            });
+        }
+
+        let now = SystemTime::now();
+        let mut scored: Vec<(Bytes, f32)> = self
+            .records
+            .values()
+            .filter(|record| filter.matches(record, now))
+            .filter_map(|record| {
+                let score = self.vectors.similarity(record.slot?, query)?;
+                Some((record.id.clone(), score))
+            })
+            .collect();
+        // Ties break on id, so a result page is stable across calls.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// The hybrid query: whichever indexes the caller gave input for,
+    /// fused into one ranking.
+    ///
+    /// Given only text this is a keyword search, given only a vector a
+    /// semantic one, and given both a fusion of the two - so one
+    /// command serves all three structures and an agent does not have
+    /// to decide which to call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query(
+        &self,
+        text_query: Option<&[u8]>,
+        vector_query: Option<&[f32]>,
+        limit: usize,
+        filter: &Filter,
+        weights: Weights,
+        fusion: Fusion,
+        max_terms: usize,
+        max_scan: usize,
+    ) -> Result<Vec<Hit>, MemoryError> {
+        let keyword = match text_query {
+            Some(query) => self.search_text(query, limit, filter, max_terms)?,
+            None => Vec::new(),
+        };
+        let vector = match vector_query {
+            Some(query) => self.search_vector(query, limit, filter, max_scan)?,
+            None => Vec::new(),
+        };
+        Ok(fuse(
+            keyword,
+            vector,
+            |id| self.records.get(id),
+            weights,
+            fusion,
+            self.config.half_life,
+            SystemTime::now(),
+        ))
     }
 
     /// BM25 over the keyword index, filtered and capped.

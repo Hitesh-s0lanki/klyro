@@ -93,9 +93,13 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 
 Klyro's memory structures for AI agents - Search, Vector, and Hybrid
 retrieval as a sixth native data type behind a `MEM.*` command family -
-are planned separately in
-[memory-structures.md](memory-structures.md). That work is independent
-of everything above and does not block, or wait on, any of it.
+are **built** as of 2026-09-10: 15 commands, BM25 keyword ranking,
+brute-force vector search over three metrics, weighted and rank-based
+fusion, metadata filters, per-record TTL, and dump format 3. See
+[memory-structures.md](memory-structures.md) for the design and what
+remains (an embedding provider, an approximate vector index, SDKs, and
+a REST gateway). That work is independent of everything above and does
+not block, or wait on, any of it.
 
 ## Suggested next steps (roughly smallest/lowest-risk first)
 

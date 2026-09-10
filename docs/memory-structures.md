@@ -4,8 +4,13 @@ An implementation plan for turning Klyro from a Redis-style data server
 into a memory database for AI agents, by adding a sixth native data
 type alongside String, List, Hash, Set, and Sorted Set.
 
-Status: plan only, nothing built. Written 2026-09-10 against commit
-`b0be44f`. See [klyro.md](klyro.md) for the current architecture and
+**Status: phases 1 to 4 are built** - the three structures, their 15
+`MEM.*` commands, filters, fusion, per-record TTL, dump format 3, eight
+configuration parameters, and an INFO section, with 125 tests over them.
+Phases 5 and 6 (SDKs and a REST gateway; an approximate vector index and
+a built-in embedder) are still plans. Written 2026-09-10 against commit
+`b0be44f`. See [klyro.md](klyro.md) for the current architecture, the
+[README](../README.md#memory-indexes) for the command reference, and
 [roadmap.md](roadmap.md) for the Redis-compatibility backlog this runs
 beside.
 
@@ -182,9 +187,13 @@ not, because changing them would invalidate the stored index.
 ```text
 MEM.ADD key [ID id] TEXT text
             [VEC <float32-le-blob> | FVEC n f1 .. fn]
-            [META field value ...] [IMPORTANCE x] [TTL seconds] [NX|XX]
+            [META field value]... [IMPORTANCE x] [TTL seconds] [NX|XX]
     -> bulk: the record id
 ```
+
+`META` takes exactly one pair and repeats, rather than running to the
+end of the arguments. A variadic option can only be last, and requiring
+that would make argument order significant everywhere else too.
 `VEC` takes raw little-endian float32 bytes, which is what every client
 already has in hand and is 4 bytes per dimension on the wire. `FVEC`
 takes them as decimal bulk strings, for `redis-cli` and for tests. A
@@ -192,14 +201,18 @@ takes them as decimal bulk strings, for `redis-cli` and for tests. A
 `m<counter>`. `NX`/`XX` gate on existence, matching `SET`.
 
 ```text
-MEM.GET key id [WITHVEC]     -> map, or Nil
+MEM.GET key id [NOTEXT] [WITHMETA] [WITHVEC]  -> map, or Nil
 MEM.MGET key id [id ...]     -> array of maps/Nils
 MEM.DEL key id [id ...]      -> integer removed
 MEM.SETMETA key id field value [field value ...]  -> integer set
-MEM.SETTEXT key id text [VEC ... | FVEC ...]      -> reindexes
+MEM.DELMETA key id field [field ...]              -> integer removed
 MEM.EXPIRE key id seconds    -> per-record TTL, 0 clears
 MEM.SCAN key cursor [COUNT n] [FILTER ...]        -> [cursor, ids]
 ```
+
+There is no separate `MEM.SETTEXT`: `MEM.ADD` on an existing id updates
+it in place, reindexing the text and reusing the vector slot, which is
+the same thing with one command instead of two.
 
 Per-record TTL is what makes session and cache memory possible later
 without a new structure. It is swept in `App::tick` alongside the
@@ -499,17 +512,31 @@ core.
 
 Each phase is independently shippable and leaves `cargo test` green.
 
-| Phase | Scope | Rough size |
+| Phase | Scope | Status |
 | --- | --- | --- |
-| **1. Type foundation** | `StoreType::Memory`, `Memory`/`MemoryRecord`, `MEM.CREATE`/`ADD`/`GET`/`MGET`/`DEL`/`CARD`/`INFO`/`SETMETA`/`SETTEXT`/`SCAN`, per-record TTL and its sweep, dump v3, config, INFO section. No retrieval yet. | ~900 lines |
-| **2. Search** | Tokenizer, postings, BM25, `MEM.SEARCH`, filter grammar and evaluation, return flags. | ~600 lines |
-| **3. Vector** | `VectorIndex`, three metrics, brute-force top-k, `MEM.VSEARCH`, `mem-max-scan`. | ~450 lines |
-| **4. Hybrid** | Normalization, recency, importance, `LINEAR` and `RRF`, `MEM.QUERY`, `MEM.CONFIG`. | ~400 lines |
-| **5. Clients** | Command reference doc, README tables, Python and TypeScript SDKs, REST gateway. | ~800 lines, mostly outside `src/` |
-| **6. Scale** | HNSW behind the `VectorIndex` interface, embedding provider so `MEM.ADD` accepts text alone, `MEM.AUTO` routing. | Large, separable |
+| **1. Type foundation** | `StoreType::Memory`, `Memory`/`MemoryRecord`, index management and record CRUD, per-record TTL and its sweep, dump v3, config, INFO section. | **Done** |
+| **2. Search** | Tokenizer, postings, BM25, `MEM.SEARCH`, filter grammar and evaluation, return flags. | **Done** |
+| **3. Vector** | `VectorIndex`, three metrics, brute-force top-k, `MEM.VSEARCH`, `mem-max-scan`. | **Done** |
+| **4. Hybrid** | Normalization, recency, importance, `LINEAR` and `RRF`, `MEM.QUERY`, `MEM.CONFIG`. | **Done** |
+| **5. Clients** | Python and TypeScript SDKs, REST gateway. | Planned |
+| **6. Scale** | HNSW behind the `VectorIndex` interface, embedding provider so `MEM.ADD` accepts text alone, `MEM.AUTO` routing. | Planned |
 
 Phases 1 through 4 are the brief's Phase 1 MVP, minus local embeddings,
 plus everything the existing keyspace already provides.
+
+### What phases 1 to 4 shipped
+
+Fifteen commands, six new modules under `src/types/memory/`, and one
+under `src/commands/`. 125 tests: unit tests beside each module for the
+tokenizer, BM25, the metrics, filter evaluation, and fusion; four
+integration files driving a real server for CRUD and keyspace interop,
+keyword ranking, the three metrics and the scan ceiling, fusion, and a
+memory index across a restart.
+
+Two things came out differently from the plan. `META` repeats as single
+pairs rather than running to the end of the arguments, so option order
+never matters. And `MEM.SETTEXT` was dropped: `MEM.ADD` on an existing
+id already updates in place.
 
 ---
 
@@ -548,6 +575,9 @@ Integration tests spawning a real server, following `tests/common`:
 
 ## 13. Decisions to confirm
 
+These were decided as written and are what phases 1 to 4 implement.
+Each is reversible, and none of them moves a module boundary.
+
 1. **RESP-native commands as the primary surface**, with REST as a
    phase 5 gateway. The alternative is HTTP first, which means an HTTP
    stack in a codebase whose defining property is having no
@@ -562,5 +592,22 @@ Integration tests spawning a real server, following `tests/common`:
 5. **Metadata as flat strings, not JSON.** Enough for every filter in
    the brief; no parser dependency.
 
-Anything settled differently here mainly changes phase ordering, not
-the module boundaries.
+## 14. What to build next
+
+In the order that buys the most:
+
+1. **An embedding provider.** Bring-your-own vectors is the sharpest
+   remaining edge: every client has to run a model and pack floats
+   itself, and two clients writing to one namespace must agree on the
+   model without anything enforcing it. Recording the model's name and
+   dimension on the index would catch the mismatch even before an
+   encoder ships.
+2. **HNSW behind the `VectorIndex` interface.** The brute-force scan is
+   exact and simple, and `mem-max-scan` keeps it from stalling the
+   server, but that ceiling is a refusal rather than an answer. An
+   approximate index turns it back into one.
+3. **`MEM.AUTO`.** Routing a query to keyword, semantic, or hybrid by
+   its shape is the differentiator the brief names, and it needs no new
+   storage - only a classifier over the query string.
+4. **The SDKs and the REST gateway.** Wrappers over an existing Redis
+   client, not a new connection layer.
