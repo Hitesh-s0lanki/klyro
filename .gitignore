@@ -7,3 +7,10 @@
 
 # Scratch crates, not part of the server
 learning
+
+# npm packages assembled by npm/build.mjs
+/npm/dist
+*.tgz
+
+# Local secrets, e.g. the npm token
+.env*

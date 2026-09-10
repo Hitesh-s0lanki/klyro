@@ -1,0 +1,214 @@
+# Publishes the npm packages that carry the Klyro binary, on every merge
+# to main that bumps `version` in Cargo.toml. Merges that don't bump it
+# stop at the version check, so this is safe to run on every push - npm
+# refuses to overwrite a published version, and finding that out from a
+# failed job would be a worse way to learn it.
+#
+# Five packages go out per release: one per platform, holding nothing
+# but that platform's binary, and the `klyro-db` wrapper that lists them
+# as optional dependencies. See docs/npm-package.md for why.
+
+name: Publish npm packages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two merges in quick succession would otherwise race to publish the
+# same version, and the loser fails.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Read Cargo.toml and ask npm whether it is new
+        id: check
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '
+              /^\[/ { inpkg = ($0 == "[package]") }
+              inpkg && /^version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "::error file=Cargo.toml::no version found in [package]" >&2
+              exit 1
+          fi
+
+          # `npm view` exits non-zero for a version that does not exist,
+          # which is the question being asked.
+          if npm view "klyro-db@$version" version >/dev/null 2>&1; then
+              echo "klyro-db@$version is already published; nothing to do"
+              publish=false
+          else
+              echo "klyro-db@$version is new"
+              publish=true
+          fi
+
+          {
+              echo "version=$version"
+              echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # The only cross build here: an arm Mac compiles for an Intel
+          # one out of the box, and GitHub has no Intel macOS runner
+          # left that is worth waiting for.
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Build the binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Assemble the package
+        run: node npm/build.mjs ${{ matrix.target }}
+
+      - name: Upload it
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: npm/dist/
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # What lets `npm publish --provenance` sign the packages.
+      id-token: write
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Collect the platform packages
+        uses: actions/download-artifact@v4
+        with:
+          path: npm/dist/
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Assemble the wrapper
+        run: node npm/build.mjs --wrapper
+
+      # An artifact round trip drops the executable bit, and a binary
+      # published without it is a package that installs and then refuses
+      # to run.
+      - name: Restore the executable bit
+        run: chmod +x npm/dist/klyro-db-*/bin/klyro
+
+      # The wrapper is the part CI cannot otherwise test: it resolves a
+      # package that only exists once npm has installed it. So install
+      # the real tarballs and run the server through the command they
+      # leave behind, before any of it is published.
+      - name: Smoke-test the packages
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+
+          # Tarballs, not the directories: npm links a directory
+          # dependency, and Node then resolves the wrapper's siblings
+          # from the checkout instead of from this install. Packing
+          # first is what makes the test exercise what users get.
+          npm pack --pack-destination . \
+              "$GITHUB_WORKSPACE"/npm/dist/klyro-db-linux-x64 \
+              "$GITHUB_WORKSPACE"/npm/dist/klyro-db >/dev/null
+          npm install --no-audit --no-fund ./klyro-db-linux-x64-*.tgz ./klyro-db-[0-9]*.tgz
+
+          ./node_modules/.bin/klyro 7171 smoke.dump &
+          wrapper=$!
+
+          for _ in $(seq 30); do
+              nc -z 127.0.0.1 7171 && break
+              sleep 1
+          done
+
+          talk() { printf '%s\r\nQUIT\r\n' "$1" | nc -w 3 127.0.0.1 7171; }
+
+          talk PING | grep -q PONG \
+              || { echo "::error::PING did not answer PONG" >&2; exit 1; }
+          talk "SET smoke $GITHUB_RUN_ID" >/dev/null
+          talk "GET smoke" | grep -qF "$GITHUB_RUN_ID" \
+              || { echo "::error::GET did not return what SET stored" >&2; exit 1; }
+
+          # Signalling the wrapper has to reach the server, or a
+          # shutdown under `npx` loses the keyspace.
+          kill -TERM $wrapper
+          wait $wrapper
+          grep -qF "$GITHUB_RUN_ID" smoke.dump \
+              || { echo "::error::SIGTERM did not reach the server" >&2; exit 1; }
+
+      # Platform packages first: the wrapper depends on them by exact
+      # version, and an install that lands between the two publishes
+      # would silently come out with no binary.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for package in npm/dist/klyro-db-*; do
+              npm publish "$package" --provenance --access public
+          done
+          npm publish npm/dist/klyro-db --provenance --access public
+
+      - name: Summarise
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          {
+              echo "### Published \`klyro-db@$VERSION\`"
+              echo
+              echo '```sh'
+              echo "npx klyro-db@$VERSION"
+              echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

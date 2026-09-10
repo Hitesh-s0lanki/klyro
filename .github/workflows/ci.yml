@@ -2,8 +2,9 @@
 # a merge to main, and by then a broken build has already landed - this
 # is what catches it first.
 #
-# The server and the site are separate jobs so a failure names which one
-# broke, and so the site's install does not sit in front of the tests.
+# The server, the site, and the npm packaging are separate jobs so a
+# failure names which one broke, and so the site's install does not sit
+# in front of the tests.
 
 name: CI
 
@@ -67,6 +68,79 @@ jobs:
 
       - name: Build the release binary
         run: cargo build --release
+
+  # The publish workflow smoke-tests the npm packages too, but by then
+  # the release is already going out. The launcher in npm/klyro-db is
+  # the part nothing else covers: it resolves a package that exists only
+  # once npm has installed it, so the only honest test is an install.
+  package:
+    name: npm package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: package-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: package-${{ runner.os }}-
+
+      - name: Build the binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Assemble the packages
+        run: |
+          node npm/build.mjs x86_64-unknown-linux-gnu
+          node npm/build.mjs --wrapper
+
+      - name: Install them and run the server through the launcher
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/package-test && cd /tmp/package-test
+          npm init -y >/dev/null
+
+          # Tarballs, not the directories: npm links a directory
+          # dependency, and Node then resolves the wrapper's siblings
+          # from the checkout instead of from this install.
+          npm pack --pack-destination . \
+              "$GITHUB_WORKSPACE"/npm/dist/klyro-db-linux-x64 \
+              "$GITHUB_WORKSPACE"/npm/dist/klyro-db >/dev/null
+          npm install --no-audit --no-fund ./klyro-db-linux-x64-*.tgz ./klyro-db-[0-9]*.tgz
+
+          ./node_modules/.bin/klyro 7171 package.dump &
+          wrapper=$!
+
+          for _ in $(seq 30); do
+              nc -z 127.0.0.1 7171 && break
+              sleep 1
+          done
+
+          talk() { printf '%s\r\nQUIT\r\n' "$1" | nc -w 3 127.0.0.1 7171; }
+
+          talk PING | grep -q PONG \
+              || { echo "::error::PING did not answer PONG" >&2; exit 1; }
+          talk "SET packaged $GITHUB_RUN_ID" >/dev/null
+          talk "GET packaged" | grep -qF "$GITHUB_RUN_ID" \
+              || { echo "::error::GET did not return what SET stored" >&2; exit 1; }
+
+          # Signalling the launcher has to reach the server, or a
+          # shutdown under `npx` loses the keyspace.
+          kill -TERM $wrapper
+          wait $wrapper
+          grep -qF "$GITHUB_RUN_ID" package.dump \
+              || { echo "::error::SIGTERM did not reach the server" >&2; exit 1; }
 
   site:
     name: Site
