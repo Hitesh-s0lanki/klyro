@@ -27,6 +27,9 @@ fn remove_if_exists(path: &std::path::Path) {
 // deterministically.
 static NEXT_PORT: AtomicU16 = AtomicU16::new(17300);
 
+/// How many ports a server tries before giving up.
+const ATTEMPTS: usize = 8;
+
 fn free_port() -> u16 {
     NEXT_PORT.fetch_add(1, Ordering::Relaxed)
 }
@@ -382,12 +385,40 @@ impl KlyroServer {
         Self::spawn(free_port(), dump_path)
     }
 
+    /// Starts a server, moving to another port if the one it was
+    /// handed cannot be bound.
+    ///
+    /// Each test binary's `NEXT_PORT` starts at the same number, and
+    /// `cargo test` runs seventeen of them back to back, so a port can
+    /// still be occupied - or holding lingering sockets - from moments
+    /// earlier. Retrying is the only fix that doesn't depend on timing:
+    /// checking a port first and then binding it is the very race the
+    /// counter exists to avoid.
     fn spawn(port: u16, dump_path: PathBuf) -> Self {
-        let args = vec![port.to_string(), dump_path.to_string_lossy().into_owned()];
-        Self::spawn_with_args(&args, port, dump_path)
+        let mut port = port;
+        for attempt in 0..ATTEMPTS {
+            let args = vec![port.to_string(), dump_path.to_string_lossy().into_owned()];
+            match Self::try_start(&args, port, dump_path.clone()) {
+                Ok(server) => return server,
+                Err(why) if attempt + 1 == ATTEMPTS => {
+                    panic!("klyro would not start on any of {ATTEMPTS} ports: {why}")
+                }
+                Err(_) => port = free_port(),
+            }
+        }
+        unreachable!("the loop either returns or panics")
     }
 
     fn spawn_with_args(args: &[String], port: u16, dump_path: PathBuf) -> Self {
+        match Self::try_start(args, port, dump_path) {
+            Ok(server) => server,
+            Err(why) => panic!("klyro on port {port} would not start: {why}"),
+        }
+    }
+
+    /// One start attempt. `Err` carries why, so the caller can decide
+    /// between retrying elsewhere and failing the test.
+    fn try_start(args: &[String], port: u16, dump_path: PathBuf) -> Result<Self, String> {
         let bin = env!("CARGO_BIN_EXE_klyro");
         let mut child = Command::new(bin)
             .args(args)
@@ -399,24 +430,29 @@ impl KlyroServer {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
-                panic!("klyro exited early with status {status:?}");
+                let mut why = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut why);
+                }
+                return Err(format!("exited with {status:?}: {}", why.trim()));
             }
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
                 break;
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
-                panic!("klyro on port {port} never became ready");
+                let _ = child.wait();
+                return Err("never became ready".to_string());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        KlyroServer {
+        Ok(KlyroServer {
             port,
             dump_path,
             config_path: None,
             child: Some(child),
-        }
+        })
     }
 
     pub fn connect(&self) -> KlyroClient {

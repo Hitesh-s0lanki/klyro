@@ -9,6 +9,7 @@
 mod generic;
 mod hash;
 mod list;
+mod memory;
 mod server;
 mod set;
 mod string;
@@ -135,6 +136,14 @@ const READ_COMMANDS: &[&str] = &[
     "ZREVRANGEBYSCORE",
     "ZRANK",
     "ZREVRANK",
+    "MEM.GET",
+    "MEM.MGET",
+    "MEM.CARD",
+    "MEM.INFO",
+    "MEM.SEARCH",
+    "MEM.VSEARCH",
+    "MEM.QUERY",
+    "MEM.SCAN",
 ];
 
 /// Executes one already-parsed command.
@@ -202,6 +211,14 @@ fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
         | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "ZPOPMIN" | "ZPOPMAX" => {
             Response::new(zset::dispatch(app, name, argv))
         }
+
+        // --- memory index commands ---
+        // Matched by prefix rather than by listing each verb, so the
+        // family can grow without the router growing with it. An
+        // unknown verb is answered by the handler, which can say which
+        // command was meant instead of falling through to the generic
+        // "unknown command".
+        _ if name.starts_with("MEM.") => Response::new(memory::dispatch(app, name, argv)),
 
         _ => Response::new(Reply::error(format!(
             "ERR unknown command '{}', with args beginning with: {}",
