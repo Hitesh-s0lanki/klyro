@@ -46,7 +46,7 @@ EXPOSE 7171
 # before exiting - so give it room to finish writing.
 STOPSIGNAL SIGTERM
 
-HEALTHCHECK --interval=10s --timeout=3s --start-period=2s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=2s --retries=3 \
     CMD ["docker-healthcheck.sh"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]

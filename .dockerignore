@@ -2,6 +2,7 @@
 # Cargo.lock, src/, and the two docker-*.sh scripts.
 target/
 .git/
+.github/
 .gitignore
 clients/
 docs/

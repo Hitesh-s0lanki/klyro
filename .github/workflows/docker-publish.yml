@@ -1,0 +1,178 @@
+# Builds and publishes the Klyro image on every merge to main, tagged
+# with the version from Cargo.toml. Bumping `version` in Cargo.toml is
+# what cuts a new tag; merges that don't bump it overwrite the existing
+# one, so the immutable handle on any given build is its `sha-` tag.
+
+name: Publish Docker image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two merges in quick succession would otherwise race to move `latest`.
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Read the version and build the image name
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '
+              /^\[/ { inpkg = ($0 == "[package]") }
+              inpkg && /^version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "::error file=Cargo.toml::no version found in [package]" >&2
+              exit 1
+          fi
+
+          # Registries reject uppercase in an image path, and this
+          # repository's owner has one.
+          image="$REGISTRY/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+
+          {
+              echo "version=$version"
+              echo "minor=${version%.*}"
+              echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Publishing $image:$version"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.version.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=latest
+            type=sha,format=short
+
+      # Built for this runner's architecture only and kept local, so the
+      # smoke test below gets to reject a broken image before anything
+      # is published. The multi-arch build after it reuses these layers.
+      - name: Build for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: klyro:smoke-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # cargo's own tests cover the server; this covers the parts only
+      # the image has - the entrypoint, the healthcheck, and the volume.
+      # It asserts on a value it wrote rather than on reply framing, so
+      # it keeps working while the wire format is still moving.
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          canary="smoke-canary-$GITHUB_RUN_ID"
+
+          docker run -d --name klyro-smoke -p 7171:7171 -v klyro-smoke-data:/data klyro:smoke-test
+
+          await_health() {
+              for _ in $(seq 30); do
+                  health=$(docker inspect -f '{{.State.Health.Status}}' klyro-smoke)
+                  [ "$health" = starting ] || break
+                  sleep 1
+              done
+              if [ "$health" != healthy ]; then
+                  echo "::error::container reported '$health'" >&2
+                  docker logs klyro-smoke >&2
+                  exit 1
+              fi
+          }
+
+          # Klyro needs CRLF, and QUIT makes it close the socket so nc
+          # stops waiting.
+          talk() {
+              printf '%s\r\nQUIT\r\n' "$1" | nc -w 3 127.0.0.1 7171
+          }
+
+          await_health
+
+          talk PING | grep -q PONG \
+              || { echo "::error::PING did not answer PONG" >&2; exit 1; }
+
+          talk "SET smoke $canary" >/dev/null
+          talk "GET smoke" | grep -qF "$canary" \
+              || { echo "::error::GET did not return what SET stored" >&2; exit 1; }
+
+          # SIGTERM has to save the dump, or a restart loses everything.
+          docker stop klyro-smoke >/dev/null
+          docker start klyro-smoke >/dev/null
+          await_health
+
+          talk "GET smoke" | grep -qF "$canary" \
+              || { echo "::error::data did not survive a restart" >&2; exit 1; }
+
+          docker rm -f klyro-smoke >/dev/null
+          docker volume rm klyro-smoke-data >/dev/null
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Expressions reach the script through the environment rather than
+      # being pasted into it, and the tag list comes from the metadata
+      # step because that is what lowercased the owner name - registries
+      # reject an uppercase letter in an image path.
+      - name: Summarise
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+              echo "### Published \`$VERSION\`"
+              echo
+              echo "Digest: \`$DIGEST\`"
+              echo
+              echo "Pull any of:"
+              echo '```'
+              printf '%s\n' "$TAGS"
+              echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -82,3 +82,66 @@ which owns `/data`.
 A named volume inherits that ownership, so the common path needs no
 setup. A bind mount does not - `-v $PWD/data:/data` needs the host
 directory to be writable by uid 10001, or the first save fails.
+
+## Publishing
+
+[`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)
+builds and pushes on every merge to `main`, and on demand from the
+Actions tab.
+
+The registry is GitHub's own, `ghcr.io`, which needs no secrets: the
+workflow logs in with the `GITHUB_TOKEN` that Actions already provides,
+given `packages: write`. Pushing to Docker Hub instead is a change of
+`REGISTRY` plus a username/token pair in the repository secrets. Note
+that the first push creates a *private* package - making it public is a
+one-time change in the repository's package settings.
+
+The version comes from `[package] version` in `Cargo.toml`, so bumping
+that line is what cuts a new tag. Every build gets four: the full
+version, major.minor, `latest`, and `sha-<commit>`. Merges that don't
+bump the version overwrite the first three, which is why the `sha-` tag
+exists - it is the only immutable handle on a particular build.
+
+Images are built for `linux/amd64` and `linux/arm64`. The arm64 half is
+emulated with QEMU, which is slow for compilation in general but barely
+noticeable here: the crate is small and its only dependency is `libc`.
+Layers are cached in the GitHub Actions cache between runs.
+
+### What it does not do
+
+The workflow does not gate on `cargo test`. It would be a two-line
+addition - a job that runs the suite and a `needs:` on the publish job -
+and it is worth adding once `tests/admin.rs` is green again; at the time
+of writing 22 of its tests fail against the in-flight `CONFIG`/`INFO`
+work, so a gate would mean no image ever gets published. The Docker
+build still fails the workflow if the crate does not compile.
+
+### Why it smoke-tests before pushing
+
+`cargo test` covers the server. Nothing in the crate covers the parts
+that only exist in the image - the entrypoint's argument building, the
+healthcheck, the volume, and whether `SIGTERM` really saves the dump.
+Those are shell and Docker semantics, and they broke twice while this
+image was being written.
+
+So the workflow builds a single-architecture image first, keeps it
+local, starts it, and checks that it goes healthy, answers `PING`,
+returns what it stored, and still has the data after a stop and start.
+Only then does it build the multi-architecture image and push. The
+second build reuses the first one's layers, so the guard is close to
+free.
+
+The test asserts on a value it wrote itself rather than on the exact
+shape of a reply, because the wire format is still moving. A test that
+matched `VALUE ok` would have started failing the moment replies became
+`$2\r\nok`.
+
+## A note on line endings
+
+The healthcheck sends `PING\r\n`, not `PING\n`. The server answers a
+CRLF-terminated line and currently ignores one that ends in a bare LF,
+which is exactly what a healthcheck built around `echo` sends. The
+first version of the healthcheck did exactly that and passed anyway,
+until a change to the server made it stop - so anything scripted against
+this server should terminate its lines properly, whether or not a bare
+LF happens to work today.
