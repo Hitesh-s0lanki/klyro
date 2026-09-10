@@ -37,7 +37,8 @@ under [tests/](tests/): spawns real `klyro` server subprocesses, talks
 RESP to them over a real socket, and checks every command's reply type,
 WRONGTYPE errors, binary-safe values, pipelining, protocol errors,
 `KEYS`/`SCAN` pattern matching, memory index retrieval and ranking, and
-a full persistence round-trip (save, kill, reload). 374 tests in all. `cargo test` builds first, so a plain
+a full persistence round-trip (save, kill, reload). 382 tests in all.
+`cargo test` builds first, so a plain
 `cargo test` from a clean checkout is enough.
 
 Compatibility with real client libraries is verified separately, by

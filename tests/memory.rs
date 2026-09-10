@@ -100,6 +100,79 @@ fn create_rejects_a_dimension_past_the_configured_ceiling() {
 }
 
 #[test]
+fn a_dim_on_a_keyword_only_index_is_a_mistake_worth_reporting() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    // Almost always a client that meant HYBRID. Accepting it silently
+    // would leave MEM.INFO reporting 0 against the number they passed.
+    assert!(client
+        .send("MEM.CREATE ns MODE SEARCH DIM 384")
+        .error()
+        .contains("did you mean MODE HYBRID?"));
+    assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
+    assert_eq!(field(&client.send("MEM.INFO ns"), "dim"), "0");
+}
+
+#[test]
+fn topk_is_bounded_by_the_configured_ceiling() {
+    let server = KlyroServer::with_config("mem-max-topk 3");
+    let mut client = server.connect();
+    hybrid(&mut client);
+    for i in 0..5 {
+        add(&mut client, "ns", &format!("r{i}"), "shared term", &[1.0, 0.0, 0.0]);
+    }
+    assert_eq!(client.send("MEM.SEARCH ns shared TOPK 3").items().len(), 3);
+    for command in [
+        "MEM.SEARCH ns shared TOPK 4",
+        "MEM.VSEARCH ns FVEC 3 1 0 0 TOPK 4",
+        "MEM.QUERY ns TEXT shared TOPK 4",
+    ] {
+        assert!(
+            client.send(command).error().contains("mem-max-topk (3)"),
+            "for {command}"
+        );
+    }
+    assert!(client.send("MEM.SEARCH ns shared TOPK 0").is_error());
+}
+
+#[test]
+fn record_text_is_bounded_by_the_configured_ceiling() {
+    let server = KlyroServer::with_config("mem-max-text-bytes 16");
+    let mut client = server.connect();
+    hybrid(&mut client);
+    assert!(!client
+        .call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "sixteen bytes ok", "FVEC", "3", "1", "0", "0"])
+        .is_error());
+    let refused = client.call(&[
+        "MEM.ADD", "ns", "ID", "b", "TEXT", "seventeen bytes!!", "FVEC", "3", "1", "0", "0",
+    ]);
+    assert!(
+        refused.error().contains("mem-max-text-bytes (16)"),
+        "{}",
+        refused.error()
+    );
+    assert_eq!(client.send("MEM.CARD ns"), int(1));
+}
+
+#[test]
+fn a_resp3_client_gets_real_maps_back() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    hybrid(&mut client);
+    add(&mut client, "ns", "a", "alpha", &[1.0, 0.0, 0.0]);
+    client.send("HELLO 3");
+    // Over RESP3 a record is a map type, not the flat array RESP2
+    // clients unpack. Both must carry the same fields.
+    let record = client.send("MEM.GET ns a WITHMETA");
+    assert_eq!(field(&record, "id"), "a");
+    assert_eq!(field(&record, "text"), "alpha");
+    let hits = client.send("MEM.SEARCH ns alpha WITHSCORES");
+    let hit = &hits.items()[0];
+    assert_eq!(field(hit, "id"), "a");
+    assert!(field(hit, "keyword_score").parse::<f64>().unwrap() > 0.0);
+}
+
+#[test]
 fn weights_and_halflife_are_tunable_but_the_shape_is_not() {
     let server = KlyroServer::new();
     let mut client = server.connect();
@@ -363,6 +436,15 @@ fn generic_commands_treat_a_memory_index_like_any_other_key() {
     add(&mut client, "ns", "b", "beta", &[0.0, 1.0, 0.0]);
     assert_eq!(client.send("MEM.CARD twin"), int(1));
     assert_eq!(client.send("MEM.CARD ns"), int(2));
+
+    // The copy carries the id counter too. Without it the copy would
+    // start assigning "m1" again and silently overwrite the record
+    // already using that id.
+    assert_eq!(client.call(&["MEM.ADD", "ns", "TEXT", "assigned here"]).text(), "m1");
+    assert_eq!(client.send("COPY ns second REPLACE"), int(1));
+    assert_eq!(client.call(&["MEM.ADD", "second", "TEXT", "and here"]).text(), "m2");
+    assert_eq!(client.send("MEM.CARD second"), int(4));
+    assert_eq!(client.send("DEL second"), int(1));
 
     assert_eq!(client.send("RENAME twin renamed"), ok());
     assert_eq!(client.send("MEM.CARD renamed"), int(1));

@@ -414,6 +414,15 @@ fn create(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
             "ERR DIM is required for a VECTOR or HYBRID index",
         ));
     }
+    // A DIM on a keyword-only index is almost always a client that
+    // meant HYBRID. Silently ignoring it would leave MEM.INFO
+    // reporting 0 against a number they passed, which hides the slip
+    // until a MEM.ADD is rejected for carrying a vector.
+    if !mode.stores_vectors() && dim.is_some() {
+        return Err(Reply::error(
+            "ERR a SEARCH index stores no vectors, so DIM does not apply; did you mean MODE HYBRID?",
+        ));
+    }
     if let Some(weights) = weights {
         if !weights.is_valid() {
             return Err(Reply::error("ERR WEIGHTS must be finite and non-negative"));

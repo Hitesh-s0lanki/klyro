@@ -57,6 +57,32 @@ fn configuration_and_records_survive_a_save_and_reload() {
         assert_eq!(field(&info, "dim"), "3");
         assert_eq!(field(&info, "metric"), "L2");
         assert_eq!(field(&info, "halflife"), "3600");
+        // Weights are what a fused query ranks by, so a restart that
+        // quietly reset them to the defaults would change results
+        // without changing anything a client can see.
+        assert_eq!(
+            info.pairs()
+                .into_iter()
+                .filter(|(f, _)| f == "weights")
+                .count(),
+            1
+        );
+        let weights = client.send("MEM.INFO ns");
+        let weights = weights
+            .items()
+            .chunks(2)
+            .find(|pair| pair[0].text() == "weights")
+            .expect("a weights field")[1]
+            .pairs();
+        assert_eq!(
+            weights,
+            vec![
+                ("importance".to_string(), "0.1".to_string()),
+                ("keyword".to_string(), "0.4".to_string()),
+                ("recency".to_string(), "0.1".to_string()),
+                ("vector".to_string(), "0.4".to_string()),
+            ]
+        );
         assert_eq!(field(&info, "records"), "2");
         assert_eq!(field(&info, "vectors"), "2");
 
@@ -210,4 +236,110 @@ fn an_empty_index_survives_with_its_configuration() {
     }
     reloaded.kill();
     reloaded.cleanup_dump();
+}
+
+#[test]
+fn weights_set_at_runtime_survive_a_restart() {
+    let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        client.send("MEM.CREATE ns MODE HYBRID DIM 2");
+        client.send("MEM.CONFIG ns WEIGHTS 0.9 0.05 0.03 0.02 HALFLIFE 60");
+        client.send("MEM.ADD ns ID worded TEXT distinctive FVEC 2 0 1");
+        client.send("MEM.ADD ns ID aimed TEXT unrelated FVEC 2 1 0");
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(field(&client.send("MEM.INFO ns"), "halflife"), "60");
+        // The proof that matters is the ranking, not the reported
+        // number: a keyword-dominant index must still rank that way.
+        let hits = client.call(&["MEM.QUERY", "ns", "TEXT", "distinctive", "FVEC", "2", "1", "0"]);
+        assert_eq!(ids(&hits)[0], "worded");
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+/// Writes a dump by hand and starts a server on it. Lets a test pin
+/// what happens to input no Klyro ever wrote - an older version, or a
+/// file someone edited.
+///
+/// The counter, rather than anything derived from `contents`: tests run
+/// in parallel, and two dumps that happen to be the same length would
+/// otherwise share a file and race.
+fn from_dump(contents: &str) -> KlyroServer {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "klyro_handwritten_{}_{}.dump",
+        std::process::id(),
+        serial
+    ));
+    std::fs::write(&path, contents).expect("write dump");
+    KlyroServer::reload(path)
+}
+
+#[test]
+fn a_version_2_dump_still_loads() {
+    // Version 3 only adds the MEMORY record, so a dump written before
+    // memory indexes existed has to keep loading unchanged.
+    let mut server = from_dump("KLYRO-DUMP 2\nSTRING -1\n8\ngreeting\n5\nhello\n");
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("GET greeting"), common::bulk("hello"));
+        assert_eq!(client.send("DBSIZE"), int(1));
+        // And a memory index can be created alongside it.
+        assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
+    }
+    server.kill();
+    server.cleanup_dump();
+}
+
+#[test]
+fn a_hand_edited_dump_cannot_smuggle_in_an_out_of_range_importance() {
+    // The command layer bounds importance, but a dump is a file on
+    // disk. Fusion multiplies by this, so an unclamped 9.0 would let
+    // one record outrank everything for good.
+    let mut server = from_dump(concat!(
+        "KLYRO-DUMP 3\n",
+        "MEMORY -1 1\n",
+        "2\nns\n",
+        "SEARCH 0 COSINE 0.35 0.5 0.1 0.05 604800 2\n",
+        "1\na\n",
+        "7\nsmuggle\n",
+        "1000 1000 9.0 -1 0 0\n",
+    ));
+    {
+        let mut client = server.connect();
+        assert_eq!(field(&client.send("MEM.GET ns a"), "importance"), "1");
+        assert_eq!(ids(&client.send("MEM.SEARCH ns smuggle")), vec!["a"]);
+    }
+    server.kill();
+    server.cleanup_dump();
+}
+
+#[test]
+fn a_truncated_dump_loses_only_what_follows_it() {
+    // A record cut off mid-stream leaves the reader out of step, so
+    // everything after it is untrustworthy - but what came before is
+    // still good, and the server must start rather than refuse to.
+    let mut server = from_dump(concat!(
+        "KLYRO-DUMP 3\n",
+        "STRING -1\n5\nfirst\n2\nok\n",
+        "MEMORY -1 4\n",
+        "2\nns\n",
+        "SEARCH 0 COSINE 0.35 0.5 0.1 0.05 604800 2\n",
+        "1\na\n",
+        "5\nalpha\n",
+    ));
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("GET first"), common::bulk("ok"));
+        assert!(!client.send("PING").is_error());
+    }
+    server.kill();
+    server.cleanup_dump();
 }

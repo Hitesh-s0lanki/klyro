@@ -510,7 +510,9 @@ fn read_memory<R: BufRead>(
         let millis = |at: usize| parts[at].parse::<i64>().unwrap_or(-1);
         let mut record = MemoryRecord::new(id, text, from_unix_millis(millis(0)));
         record.updated_at = from_unix_millis(millis(1));
-        record.importance = parts[2].parse().unwrap_or(0.5);
+        // Clamped on the way in: the command layer bounds this, but a
+        // dump is a file on disk and may have been edited by hand.
+        record.importance = parts[2].parse().unwrap_or(0.5f32).clamp(0.0, 1.0);
         record.expire_at = match millis(3) {
             at if at >= 0 => Some(from_unix_millis(at)),
             _ => None,

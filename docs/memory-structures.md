@@ -6,7 +6,7 @@ type alongside String, List, Hash, Set, and Sorted Set.
 
 **Status: phases 1 to 4 are built** - the three structures, their 15
 `MEM.*` commands, filters, fusion, per-record TTL, dump format 3, eight
-configuration parameters, and an INFO section, with 125 tests over them.
+configuration parameters, and an INFO section, with 133 tests over them.
 Phases 5 and 6 (SDKs and a REST gateway; an approximate vector index and
 a built-in embedder) are still plans. Written 2026-09-10 against commit
 `b0be44f`. See [klyro.md](klyro.md) for the current architecture, the
@@ -527,7 +527,7 @@ plus everything the existing keyspace already provides.
 ### What phases 1 to 4 shipped
 
 Fifteen commands, six new modules under `src/types/memory/`, and one
-under `src/commands/`. 125 tests: unit tests beside each module for the
+under `src/commands/`. 133 tests: unit tests beside each module for the
 tokenizer, BM25, the metrics, filter evaluation, and fusion; four
 integration files driving a real server for CRUD and keyspace interop,
 keyword ranking, the three metrics and the scan ceiling, fusion, and a
