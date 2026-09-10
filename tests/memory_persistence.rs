@@ -29,7 +29,9 @@ fn configuration_and_records_survive_a_save_and_reload() {
     let mut server = KlyroServer::new();
     {
         let mut client = server.connect();
-        client.send("MEM.CREATE ns MODE HYBRID DIM 3 METRIC L2 WEIGHTS 0.4 0.4 0.1 0.1 HALFLIFE 3600");
+        client.send(
+            "MEM.CREATE ns MODE HYBRID DIM 3 METRIC L2 WEIGHTS 0.4 0.4 0.1 0.1 HALFLIFE 3600",
+        );
         client.call_bytes(&[
             b"MEM.ADD".to_vec(),
             b"ns".to_vec(),
@@ -45,7 +47,19 @@ fn configuration_and_records_survive_a_save_and_reload() {
             b"IMPORTANCE".to_vec(),
             b"0.85".to_vec(),
         ]);
-        client.call(&["MEM.ADD", "ns", "ID", "b", "TEXT", "User worked with MySQL", "FVEC", "3", "0", "1", "0"]);
+        client.call(&[
+            "MEM.ADD",
+            "ns",
+            "ID",
+            "b",
+            "TEXT",
+            "User worked with MySQL",
+            "FVEC",
+            "3",
+            "0",
+            "1",
+            "0",
+        ]);
     }
     server.shutdown();
 
@@ -87,7 +101,10 @@ fn configuration_and_records_survive_a_save_and_reload() {
         assert_eq!(field(&info, "vectors"), "2");
 
         let record = client.send("MEM.GET ns a WITHMETA WITHVEC");
-        assert_eq!(field(&record, "text"), "User prefers PostgreSQL for backend projects.");
+        assert_eq!(
+            field(&record, "text"),
+            "User prefers PostgreSQL for backend projects."
+        );
         assert_eq!(field(&record, "importance"), "0.85");
         // L2 stores vectors unchanged, so these are the bytes sent.
         let vector = record
@@ -172,8 +189,26 @@ fn a_record_ttl_is_an_absolute_deadline_across_a_restart() {
     {
         let mut client = server.connect();
         client.send("MEM.CREATE ns MODE SEARCH");
-        client.call(&["MEM.ADD", "ns", "ID", "long", "TEXT", "still here", "TTL", "3600"]);
-        client.call(&["MEM.ADD", "ns", "ID", "short", "TEXT", "gone soon", "TTL", "1"]);
+        client.call(&[
+            "MEM.ADD",
+            "ns",
+            "ID",
+            "long",
+            "TEXT",
+            "still here",
+            "TTL",
+            "3600",
+        ]);
+        client.call(&[
+            "MEM.ADD",
+            "ns",
+            "ID",
+            "short",
+            "TEXT",
+            "gone soon",
+            "TTL",
+            "1",
+        ]);
     }
     server.shutdown();
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -184,10 +219,12 @@ fn a_record_ttl_is_an_absolute_deadline_across_a_restart() {
         // Downtime counts against the deadline, so the short one is
         // already gone while the long one keeps most of its TTL.
         assert_eq!(client.send("MEM.GET ns short"), common::nil());
-        assert!(field(&client.send("MEM.GET ns long"), "pttl")
-            .parse::<i64>()
-            .unwrap()
-            > 3_500_000);
+        assert!(
+            field(&client.send("MEM.GET ns long"), "pttl")
+                .parse::<i64>()
+                .unwrap()
+                > 3_500_000
+        );
     }
     reloaded.kill();
     reloaded.cleanup_dump();
@@ -199,8 +236,14 @@ fn an_assigned_id_is_never_reissued_after_a_reload() {
     {
         let mut client = server.connect();
         client.send("MEM.CREATE ns MODE SEARCH");
-        assert_eq!(client.call(&["MEM.ADD", "ns", "TEXT", "first"]).text(), "m1");
-        assert_eq!(client.call(&["MEM.ADD", "ns", "TEXT", "second"]).text(), "m2");
+        assert_eq!(
+            client.call(&["MEM.ADD", "ns", "TEXT", "first"]).text(),
+            "m1"
+        );
+        assert_eq!(
+            client.call(&["MEM.ADD", "ns", "TEXT", "second"]).text(),
+            "m2"
+        );
         assert_eq!(client.send("MEM.DEL ns m2"), int(1));
     }
     server.shutdown();
@@ -210,7 +253,10 @@ fn an_assigned_id_is_never_reissued_after_a_reload() {
         let mut client = reloaded.connect();
         // m2 was deleted, but its id must not come back around: an
         // agent may still hold a reference to it.
-        assert_eq!(client.call(&["MEM.ADD", "ns", "TEXT", "third"]).text(), "m3");
+        assert_eq!(
+            client.call(&["MEM.ADD", "ns", "TEXT", "third"]).text(),
+            "m3"
+        );
     }
     reloaded.kill();
     reloaded.cleanup_dump();
@@ -221,7 +267,10 @@ fn an_empty_index_survives_with_its_configuration() {
     let mut server = KlyroServer::new();
     {
         let mut client = server.connect();
-        assert_eq!(client.send("MEM.CREATE ns MODE VECTOR DIM 8 METRIC IP"), ok());
+        assert_eq!(
+            client.send("MEM.CREATE ns MODE VECTOR DIM 8 METRIC IP"),
+            ok()
+        );
     }
     server.shutdown();
 
@@ -256,7 +305,16 @@ fn weights_set_at_runtime_survive_a_restart() {
         assert_eq!(field(&client.send("MEM.INFO ns"), "halflife"), "60");
         // The proof that matters is the ranking, not the reported
         // number: a keyword-dominant index must still rank that way.
-        let hits = client.call(&["MEM.QUERY", "ns", "TEXT", "distinctive", "FVEC", "2", "1", "0"]);
+        let hits = client.call(&[
+            "MEM.QUERY",
+            "ns",
+            "TEXT",
+            "distinctive",
+            "FVEC",
+            "2",
+            "1",
+            "0",
+        ]);
         assert_eq!(ids(&hits)[0], "worded");
     }
     reloaded.kill();

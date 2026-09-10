@@ -86,12 +86,17 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 ## Software engineering
 
 - ~~No automated test suite~~ **Done (2026-09-09, extended
-  2026-09-10).** See [tests/](../tests/) and `cargo test` — 248 tests
+  2026-09-10).** See [tests/](../tests/) and `cargo test` — 461 tests
   covering every command, WRONGTYPE, multi-value push/add,
   `KEYS`/`SCAN` pattern matching, INFO/CONFIG, config-file loading,
-  RESP framing, and a full persistence round-trip.
-  Still no CI (nothing runs `cargo test` automatically on push).
-- No license file.
+  RESP framing, transactions, pub/sub, the blocking pops, and a full
+  persistence round-trip.
+- ~~No CI~~ **Done (2026-09-10).** `.github/workflows/ci.yml` runs
+  `cargo fmt --check`, `cargo clippy -D warnings`, the test suite, and
+  a release build on every push and pull request, plus the site's
+  typecheck and build. The Docker workflow still only runs on a merge
+  to main.
+- ~~No license file~~ **Done (2026-09-10).** MIT.
 
 ## Beyond Redis compatibility
 

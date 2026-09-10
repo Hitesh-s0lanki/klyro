@@ -1,0 +1,98 @@
+# Runs on every push and pull request. The Docker workflow only runs on
+# a merge to main, and by then a broken build has already landed - this
+# is what catches it first.
+#
+# The server and the site are separate jobs so a failure names which one
+# broke, and so the site's install does not sit in front of the tests.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first one's result stale.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # rustup ships on the runner, but the pinned toolchain and the two
+      # components are not guaranteed to be the ones already installed.
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal \
+              --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Check the formatting
+        run: cargo fmt --all --check
+
+      # --all-targets covers the tests too, which is where most of the
+      # lint-worthy code now lives.
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets
+
+      # cargo test --all-targets skips doctests, and the modules carry
+      # examples in their doc comments.
+      - name: Test the documentation examples
+        run: cargo test --doc
+
+      - name: Build the release binary
+        run: cargo build --release
+
+  site:
+    name: Site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ci, not install: it installs exactly what the lockfile pins and
+      # fails if package.json and the lockfile disagree.
+      - name: Install the dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

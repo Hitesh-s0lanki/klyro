@@ -2,6 +2,9 @@
 
 **The high-performance in-memory data server.**
 
+[![CI](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml/badge.svg)](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An in-memory, Redis-style data server in Rust, with String, List, Hash,
 Set, and Sorted Set data types - plus **Memory**, a retrieval structure
 for AI agents that indexes text and embeddings together and ranks by
@@ -648,3 +651,7 @@ comparison against Redis. The ones worth knowing before you use this:
   client-side caching (`CLIENT TRACKING`) to invalidate over them.
 - `SCAN`'s cursor is a position in a sorted snapshot of the keyspace, so
   each call costs O(n log n) rather than the O(1) a real `SCAN` gives.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

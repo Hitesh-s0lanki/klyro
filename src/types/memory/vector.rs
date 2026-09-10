@@ -66,7 +66,7 @@ pub fn parse_le_f32(blob: &[u8]) -> Result<Vec<f32>, VectorError> {
     if !blob.len().is_multiple_of(4) {
         return Err(VectorError::NotFloats);
     }
-    blob.chunks_exact(4)
+    blob.as_chunks::<4>().0.iter()
         .map(|c| {
             let value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             if value.is_finite() {

@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{int, nil, ok, KlyroServer, KlyroClient, Value, WRONGTYPE};
+use common::{int, nil, ok, KlyroClient, KlyroServer, Value, WRONGTYPE};
 
 /// A float32 vector encoded the way a client sends one: raw
 /// little-endian bytes, four per dimension.
@@ -96,7 +96,12 @@ fn create_rejects_a_dimension_past_the_configured_ceiling() {
         .send("MEM.CREATE ns MODE VECTOR DIM 99999")
         .error()
         .starts_with("ERR DIM must be between 1 and mem-max-dim"));
-    assert_eq!(client.send("MEM.CREATE ns MODE VECTOR DIM 0").error().is_empty(), false);
+    assert!(
+        !client
+            .send("MEM.CREATE ns MODE VECTOR DIM 0")
+            .error()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -119,7 +124,13 @@ fn topk_is_bounded_by_the_configured_ceiling() {
     let mut client = server.connect();
     hybrid(&mut client);
     for i in 0..5 {
-        add(&mut client, "ns", &format!("r{i}"), "shared term", &[1.0, 0.0, 0.0]);
+        add(
+            &mut client,
+            "ns",
+            &format!("r{i}"),
+            "shared term",
+            &[1.0, 0.0, 0.0],
+        );
     }
     assert_eq!(client.send("MEM.SEARCH ns shared TOPK 3").items().len(), 3);
     for command in [
@@ -141,10 +152,32 @@ fn record_text_is_bounded_by_the_configured_ceiling() {
     let mut client = server.connect();
     hybrid(&mut client);
     assert!(!client
-        .call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "sixteen bytes ok", "FVEC", "3", "1", "0", "0"])
+        .call(&[
+            "MEM.ADD",
+            "ns",
+            "ID",
+            "a",
+            "TEXT",
+            "sixteen bytes ok",
+            "FVEC",
+            "3",
+            "1",
+            "0",
+            "0"
+        ])
         .is_error());
     let refused = client.call(&[
-        "MEM.ADD", "ns", "ID", "b", "TEXT", "seventeen bytes!!", "FVEC", "3", "1", "0", "0",
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "b",
+        "TEXT",
+        "seventeen bytes!!",
+        "FVEC",
+        "3",
+        "1",
+        "0",
+        "0",
     ]);
     assert!(
         refused.error().contains("mem-max-text-bytes (16)"),
@@ -196,7 +229,10 @@ fn add_returns_the_id_and_assigns_one_when_asked() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     hybrid(&mut client);
-    assert_eq!(add(&mut client, "ns", "mem_001", "text", &[1.0, 0.0, 0.0]).text(), "mem_001");
+    assert_eq!(
+        add(&mut client, "ns", "mem_001", "text", &[1.0, 0.0, 0.0]).text(),
+        "mem_001"
+    );
     let assigned = client.call_bytes(&[
         b"MEM.ADD".to_vec(),
         b"ns".to_vec(),
@@ -215,8 +251,22 @@ fn get_returns_the_record_and_nil_for_a_missing_one() {
     let mut client = server.connect();
     hybrid(&mut client);
     client.call(&[
-        "MEM.ADD", "ns", "ID", "a", "TEXT", "User prefers PostgreSQL", "FVEC", "3", "1", "0", "0",
-        "META", "type", "preference", "IMPORTANCE", "0.85",
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "a",
+        "TEXT",
+        "User prefers PostgreSQL",
+        "FVEC",
+        "3",
+        "1",
+        "0",
+        "0",
+        "META",
+        "type",
+        "preference",
+        "IMPORTANCE",
+        "0.85",
     ]);
     let record = client.send("MEM.GET ns a WITHMETA");
     assert_eq!(field(&record, "id"), "a");
@@ -244,7 +294,10 @@ fn mget_answers_in_the_order_asked() {
 fn withvec_returns_the_stored_vector_as_float32_bytes() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("MEM.CREATE ns MODE VECTOR DIM 3 METRIC IP"), ok());
+    assert_eq!(
+        client.send("MEM.CREATE ns MODE VECTOR DIM 3 METRIC IP"),
+        ok()
+    );
     add(&mut client, "ns", "a", "text", &[1.5, -2.5, 0.25]);
     let record = client.send("MEM.GET ns a WITHVEC");
     let vector = record
@@ -289,7 +342,9 @@ fn nx_and_xx_gate_on_whether_the_record_exists() {
         .is_error());
     assert_eq!(
         client
-            .call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "x", "FVEC", "3", "1", "0", "0", "NX", "XX"])
+            .call(&[
+                "MEM.ADD", "ns", "ID", "a", "TEXT", "x", "FVEC", "3", "1", "0", "0", "NX", "XX"
+            ])
             .error(),
         "ERR NX and XX are mutually exclusive"
     );
@@ -346,7 +401,10 @@ fn setmeta_counts_new_fields_and_delmeta_counts_removed_ones() {
     let mut client = server.connect();
     hybrid(&mut client);
     add(&mut client, "ns", "a", "text", &[1.0, 0.0, 0.0]);
-    assert_eq!(client.send("MEM.SETMETA ns a type preference tag db"), int(2));
+    assert_eq!(
+        client.send("MEM.SETMETA ns a type preference tag db"),
+        int(2)
+    );
     assert_eq!(client.send("MEM.SETMETA ns a type fact"), int(0));
     assert_eq!(client.send("MEM.DELMETA ns a tag absent"), int(1));
     assert_eq!(
@@ -369,7 +427,12 @@ fn a_record_expires_on_its_own_deadline() {
     add(&mut client, "ns", "a", "alpha", &[1.0, 0.0, 0.0]);
     add(&mut client, "ns", "b", "beta", &[0.0, 1.0, 0.0]);
     assert_eq!(client.send("MEM.EXPIRE ns a 100"), int(1));
-    assert!(field(&client.send("MEM.GET ns a"), "pttl").parse::<i64>().unwrap() > 99_000);
+    assert!(
+        field(&client.send("MEM.GET ns a"), "pttl")
+            .parse::<i64>()
+            .unwrap()
+            > 99_000
+    );
     // 0 clears the deadline, the way PERSIST relates to EXPIRE.
     assert_eq!(client.send("MEM.EXPIRE ns a 0"), int(1));
     assert_eq!(field(&client.send("MEM.GET ns a"), "pttl"), "-1");
@@ -386,7 +449,13 @@ fn scan_pages_through_every_record_once() {
     let mut client = server.connect();
     hybrid(&mut client);
     for i in 0..7 {
-        add(&mut client, "ns", &format!("r{i}"), "text", &[1.0, 0.0, 0.0]);
+        add(
+            &mut client,
+            "ns",
+            &format!("r{i}"),
+            "text",
+            &[1.0, 0.0, 0.0],
+        );
     }
     let mut seen = Vec::new();
     let mut cursor = "0".to_string();
@@ -409,8 +478,25 @@ fn scan_applies_metadata_filters() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     hybrid(&mut client);
-    client.call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "x", "FVEC", "3", "1", "0", "0", "META", "type", "preference"]);
-    client.call(&["MEM.ADD", "ns", "ID", "b", "TEXT", "y", "FVEC", "3", "1", "0", "0", "META", "type", "fact"]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "a",
+        "TEXT",
+        "x",
+        "FVEC",
+        "3",
+        "1",
+        "0",
+        "0",
+        "META",
+        "type",
+        "preference",
+    ]);
+    client.call(&[
+        "MEM.ADD", "ns", "ID", "b", "TEXT", "y", "FVEC", "3", "1", "0", "0", "META", "type", "fact",
+    ]);
     let page = client.send("MEM.SCAN ns 0 COUNT 100 FILTER type EQ preference");
     assert_eq!(page.items()[1].list(), vec!["a"]);
 }
@@ -440,9 +526,19 @@ fn generic_commands_treat_a_memory_index_like_any_other_key() {
     // The copy carries the id counter too. Without it the copy would
     // start assigning "m1" again and silently overwrite the record
     // already using that id.
-    assert_eq!(client.call(&["MEM.ADD", "ns", "TEXT", "assigned here"]).text(), "m1");
+    assert_eq!(
+        client
+            .call(&["MEM.ADD", "ns", "TEXT", "assigned here"])
+            .text(),
+        "m1"
+    );
     assert_eq!(client.send("COPY ns second REPLACE"), int(1));
-    assert_eq!(client.call(&["MEM.ADD", "second", "TEXT", "and here"]).text(), "m2");
+    assert_eq!(
+        client
+            .call(&["MEM.ADD", "second", "TEXT", "and here"])
+            .text(),
+        "m2"
+    );
     assert_eq!(client.send("MEM.CARD second"), int(4));
     assert_eq!(client.send("DEL second"), int(1));
 
@@ -451,7 +547,10 @@ fn generic_commands_treat_a_memory_index_like_any_other_key() {
     assert_eq!(client.send("EXPIRE renamed 100"), int(1));
     assert!(client.send("TTL renamed").integer() > 0);
     assert_eq!(client.send("DEL renamed"), int(1));
-    assert_eq!(client.send("MEM.CARD renamed").error(), "ERR no such memory index");
+    assert_eq!(
+        client.send("MEM.CARD renamed").error(),
+        "ERR no such memory index"
+    );
 }
 
 #[test]
