@@ -6,13 +6,15 @@ same ground at the architecture level. This document is the detailed
 inventory: what exists, what is missing, and which gaps actually block
 real workloads.
 
-**Status, 2026-09-10:** Tiers 1, 2, and the protocol rewrite at the top
-of Tier 3 are built. Klyro speaks RESP, so stock Redis clients work, and
-implements **107 commands**, up from 39. Redis implements roughly
-**240**. The gap that remains is not mainly in count: the load-bearing
-pieces left are protocol- and subsystem-shaped, not command-shaped.
-Sections below are marked **Done** where they have been closed. See
-[command-expansion.md](command-expansion.md) for the decisions behind
+**Status, 2026-09-10:** Tiers 1, 2, and 3 are built. Klyro speaks RESP,
+so stock Redis clients work, and it now has transactions, pub/sub, and
+the blocking pops - which between them are why most people reach for
+Redis at all. It implements **130 commands**, up from 39. Redis
+implements roughly **240**. The gap that remains is not mainly in
+count: what is left is subsystem-shaped, not command-shaped, and Tier 4
+is where it lives. Sections below are marked **Done** where they have
+been closed. See [command-expansion.md](command-expansion.md) and
+[connection-state.md](connection-state.md) for the decisions behind
 that work.
 
 ---
@@ -54,13 +56,24 @@ Everything that hung off this is fixed with it:
 - **The three hand-written client libraries are retired**, because
   stock clients replace them.
 
-Still missing: RESP3 push messages (nothing to push without pub/sub),
-and `RESET`/`CLIENT`.
+RESP3 push messages and `RESET` arrived with pub/sub. `CLIENT` covers
+the subcommands that describe the calling connection - `ID`, `GETNAME`,
+`SETNAME`, `SETINFO`, `INFO` - but not `LIST` or `KILL`, which reach
+into other connections.
 
-### 1.3 No transactions
+### 1.3 No transactions — **Done**
 
-`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` are all absent. There is
-no way to group commands atomically and no optimistic-locking primitive.
+`MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH` are in, along with
+`RESET`. A queue runs with nothing interleaved, which costs nothing to
+guarantee on a single-threaded server; `WATCH` is the optimistic-locking
+primitive, implemented with a version counter per watched key rather
+than by marking other connections dirty. `EXEC` does not roll back a
+command that fails at run time, matching Redis, but an error that can be
+caught while queueing aborts the whole transaction with `EXECABORT`.
+See [connection-state.md](connection-state.md).
+
+Two deviations, both documented in section 6: a successful write that
+changed nothing still aborts a watcher, and an expiring key does not.
 
 ### 1.4 No scripting or functions
 
@@ -68,19 +81,31 @@ No `EVAL`, `EVALSHA`, `SCRIPT LOAD`, or the 7.0 `FUNCTION` API. Scripting
 is the usual escape hatch for atomic read-modify-write, so its absence
 compounds 1.1 and 1.3.
 
-### 1.5 No pub/sub and no keyspace notifications
+### 1.5 No pub/sub — **Done**, except keyspace notifications
 
-No `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`, `PSUBSCRIBE`, `SSUBSCRIBE`
-(sharded pub/sub), and no `notify-keyspace-events`. Rules out fan-out
-messaging, cache-invalidation broadcasts, and expiry-driven callbacks.
+`SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBLISH`, and
+`PUBSUB CHANNELS`/`NUMSUB`/`NUMPAT` are in, and RESP3's push type is
+implemented with them. A RESP2 subscriber is restricted to the subscribe
+commands, `PING`, `RESET`, and `QUIT`, as in Redis, because RESP2 has no
+marker separating a delivered message from a reply; RESP3 lifts the
+restriction.
 
-### 1.6 No blocking commands — no work queues
+Still missing here: `notify-keyspace-events`, so no expiry-driven or
+write-driven callbacks - the key-write signal the rest of this work
+added is the hard half of it, and the event vocabulary is the rest.
+Sharded pub/sub (`SSUBSCRIBE`, `SPUBLISH`) exists to route messages
+across cluster slots, which Klyro has no equivalent of.
 
-No `BLPOP`, `BRPOP`, `BLMOVE`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX`. A
-Redis-backed job queue is normally a blocking pop; without it, consumers
-must busy-poll. The single-threaded `poll()` loop in
-[server.rs](../src/server.rs) has no concept of a parked client, so this
-needs a per-key waiter registry before any of these can be added.
+### 1.6 No blocking commands — **Done**
+
+`BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `BLMPOP`, `BZPOPMIN`,
+`BZPOPMAX`, and `BZMPOP` are in, so a Redis-backed job queue works
+without busy-polling. The event loop parks a connection, stops feeding
+it commands, and re-runs the blocked command from the top whenever a key
+it waits on is written; waiters on one key are served oldest first.
+`poll`'s timeout is shortened to the nearest deadline so a sub-second
+timeout is honoured. `LMPOP` and `ZMPOP`, the non-blocking commands that
+share the same argument shape, came with them.
 
 ### 1.7 No authentication, ACLs, or TLS
 
@@ -97,10 +122,14 @@ measured by a counting global allocator rather than estimated, and the
 hit ratio counts read commands only. Nine parameters that used to be
 constants in the source are now settable, seven of them at runtime.
 
+`INFO` also reports `blocked_clients`, `watching_clients`,
+`pubsub_clients`, `pubsub_channels`, `pubsub_patterns`,
+`total_messages_published`, and `total_transactions` now.
+
 Still missing from this family: `CONFIG REWRITE`, `CLIENT LIST`,
-`CLIENT KILL`, `COMMAND`, `MONITOR`, `SLOWLOG`, `LATENCY`,
-`MEMORY USAGE`, `DEBUG`, `LASTSAVE`, `TIME`, `RESET`, `ROLE`, `WAIT`,
-and per-command statistics.
+`CLIENT KILL`, a real `COMMAND` table, `MONITOR`, `SLOWLOG`, `LATENCY`,
+`MEMORY USAGE`, `DEBUG`, `LASTSAVE`, `TIME`, `ROLE`, `WAIT`, and
+per-command statistics.
 
 ---
 
@@ -126,20 +155,16 @@ Notes:
 
 | Implemented | Missing |
 |---|---|
-| `SET` (with `NX`/`XX`/`EX`/`PX`/`KEEPTTL`), `SETNX`, `SETEX`, `PSETEX`, `GET`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN`, `GETRANGE`, `SETRANGE` | `MSETNX`, `SUBSTR`, `LCS`, and `SET`'s `GET` flag |
-
-`MSET` and `HMSET` take single-token values, unlike `SET`/`HSET`, since
-there is no other way to tell the pairs apart in a line protocol.
+| `SET` (with `NX`/`XX`/`EX`/`PX`/`EXAT`/`PXAT`/`KEEPTTL`/`GET`), `SETNX`, `SETEX`, `PSETEX`, `GET`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `MSETNX`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN`, `GETRANGE`, `SUBSTR`, `SETRANGE` | `LCS` |
 
 ### 2.3 Lists
 
 | Implemented | Missing |
 |---|---|
-| `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP` (with `count`), `RPOP` (with `count`), `LLEN`, `LRANGE`, `LINDEX`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `RPOPLPUSH`, `LMOVE` | `LPOS`, `LMPOP`, plus all blocking variants (`BLPOP`, `BRPOP`, `BLMOVE`, `BLMPOP`) |
+| `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP` (with `count`), `RPOP` (with `count`), `LLEN`, `LRANGE`, `LINDEX`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `RPOPLPUSH`, `LMOVE`, `LMPOP`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `BLMPOP` | `LPOS` |
 
-The blocking variants are the real remaining gap here: they are what a
-Redis-backed job queue is built on, and they need connection-parking
-machinery the event loop doesn't have yet (see 1.6).
+The blocking variants are in, so a work queue no longer has to
+busy-poll. `LPOS` is the only list command left.
 
 ### 2.4 Hashes
 
@@ -147,8 +172,8 @@ machinery the event loop doesn't have yet (see 1.6).
 |---|---|
 | `HSET`, `HSETNX`, `HMSET`, `HGET`, `HMGET`, `HDEL`, `HLEN`, `HEXISTS`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN` | `HRANDFIELD`, `HSCAN`, and the 7.4 per-field TTL family (`HEXPIRE`, `HPEXPIRE`, `HTTL`, `HPERSIST`) |
 
-`HSET` still takes exactly one field/value pair, because its value is
-the rest of the line; `HMSET` is the variadic spelling.
+`HSET` and `HMSET` are both variadic now: RESP delimits arguments, so
+several field/value pairs in one command are unambiguous.
 
 ### 2.5 Sets
 
@@ -164,7 +189,7 @@ scale, worth revisiting if sets get large.
 
 | Implemented | Missing |
 |---|---|
-| `ZADD`, `ZSCORE`, `ZMSCORE`, `ZINCRBY`, `ZREM`, `ZCARD`, `ZCOUNT`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANK`, `ZREVRANK`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZPOPMIN`, `ZPOPMAX` | `ZRANGEBYLEX`, `ZREMRANGEBYLEX`, `ZLEXCOUNT`, `ZRANGESTORE`, `ZMPOP`, `BZPOPMIN`, `BZPOPMAX`, `ZRANDMEMBER`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERCARD`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZSCAN` |
+| `ZADD`, `ZSCORE`, `ZMSCORE`, `ZINCRBY`, `ZREM`, `ZCARD`, `ZCOUNT`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANK`, `ZREVRANK`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZPOPMIN`, `ZPOPMAX`, `ZMPOP`, `BZPOPMIN`, `BZPOPMAX`, `BZMPOP` | `ZRANGEBYLEX`, `ZREMRANGEBYLEX`, `ZLEXCOUNT`, `ZRANGESTORE`, `ZRANDMEMBER`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERCARD`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZSCAN` |
 
 Score-range queries now cover the leaderboard, rate-limiter, and
 delayed-queue patterns. Bounds accept `-inf`/`+inf` and the `(`
@@ -178,13 +203,21 @@ which is a deviation from Redis rather than an omission.
 ### 2.7 Variadic inconsistency — **Done**
 
 `DEL`, `HDEL`, `SREM`, and `ZREM` are now variadic alongside `SADD`,
-`LPUSH`, `RPUSH`, and `ZADD`. Each kept its original single-argument
-reply (`OK`/`NOT_FOUND`) and only switches to `DELETED <n>` when given
-more than one, so the existing client libraries keep working unchanged.
+`LPUSH`, `RPUSH`, and `ZADD`, and each replies with a count, as Redis
+does. `HSET` is variadic too, now that RESP delimits arguments rather
+than the value running to the end of the line.
 
-`HSET` stays single-pair by design: its value is the rest of the line,
-so a variadic form would be ambiguous. `HMSET` is the variadic
-spelling.
+### 2.8 Transactions, pub/sub, and connection
+
+| Implemented | Missing |
+|---|---|
+| `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `RESET` | — |
+| `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBLISH`, `PUBSUB CHANNELS`/`NUMSUB`/`NUMPAT` | `SSUBSCRIBE`, `SUNSUBSCRIBE`, `SPUBLISH`, `PUBSUB SHARDCHANNELS`/`SHARDNUMSUB` |
+| `HELLO`, `PING`, `ECHO`, `QUIT`, `CLIENT ID`/`GETNAME`/`SETNAME`/`SETINFO`/`INFO` | `AUTH`, `SELECT`, `CLIENT LIST`/`KILL`/`PAUSE`/`NO-EVICT`, `MONITOR` |
+
+The sharded spellings route by cluster slot, which Klyro has no
+equivalent of; the `CLIENT` subcommands that are missing are the ones
+that reach into connections other than the caller's.
 
 ---
 
@@ -220,12 +253,13 @@ existing types.
 - **No Sentinel and no Cluster.** Single process, single node, bounded by
   one machine's RAM and one core. No hash slots, no `CLUSTER` command
   family, no `MOVED`/`ASK` redirection.
-- **No `maxmemory` and no eviction policy.** Redis offers eight
-  (`allkeys-lru`, `volatile-ttl`, `allkeys-lfu`, ...). Klyro grows until
-  the OS kills it, which makes it unusable as a bounded cache — the most
-  common Redis deployment shape of all. `INFO memory` now reports real
-  usage from a counting allocator, so the measurement half of this is
-  done; the policy half is not.
+- ~~**No `maxmemory` and no eviction policy.**~~ **Done (2026-09-10).**
+  All eight of Redis's policies (`allkeys-lru`, `volatile-ttl`,
+  `allkeys-lfu`, ...), chosen by sampling `maxmemory-samples` keys per
+  round as Redis does. Writes that could grow the keyspace are refused
+  with `OOM` once eviction cannot free enough; everything that can only
+  shrink it still runs. `INFO` reports the limit, the policy, and an
+  `evicted_keys` count. See [eviction.md](eviction.md).
 
 ---
 
@@ -236,12 +270,13 @@ These are correctness-adjacent: they work, but degrade badly with size.
 | Area | Current | Redis |
 |---|---|---|
 | Expired-key sweep | `Store::sweep_expired` scans the **entire** keyspace every second | Samples 20 random keys from the volatile set, adaptively |
+| Eviction | Samples `maxmemory-samples` keys per round from an O(1) key index | The same, plus a pool carrying good candidates between rounds |
 | `SCAN` | `Store::scan` collects and **sorts every live key on each call** — O(N log N) per call, O(N² log N) for a full iteration | O(1) amortized per call via reverse-binary bucket cursor |
 | `KEYS` | Clones every key into a `Vec` before filtering | Streams matches, still O(N) but no full copy |
 | Sorted set | `Vec<(String, f64)>` with linear `find_index`; `add`/`rem` are O(N) | Skip list + hash map, O(log N) |
 | Event loop | `poll()`, rebuilding the pollfd array each iteration — O(N) per tick in connection count | `epoll`/`kqueue`, O(ready) |
 | Threading | Strictly single-threaded | Single-threaded command execution plus optional I/O threads |
-| Connections | Unbounded; nothing enforces a limit | `maxclients`, with a graceful rejection |
+| Connections | Bounded by `maxclients`, with a graceful rejection | The same |
 | Encodings | One representation per type | listpack / intset / ziplist compaction for small collections |
 
 The `SCAN` implementation deserves special mention: because the cursor is
@@ -275,9 +310,19 @@ Places where a command exists but behaves differently from Redis:
    libraries gate command availability on it. It names the Redis release
    whose command shapes Klyro implements, not a claim to be that server;
    `klyro_version` sits beside it.
-9. **`HELLO` reports `id: 0` for every connection**, since connections
-   are not individually identified. Nothing Klyro implements uses the
-   client id.
+9. ~~`HELLO` reports `id: 0` for every connection.~~ **Fixed.**
+   Connections carry an id now, which `HELLO`, `CLIENT ID`, and the
+   pub/sub and blocking registries all use.
+10. **A write that changed nothing still aborts a watching
+    transaction.** `SET k v` over an identical value, or a `DEL` of a
+    missing key, bumps the watched-key version; Redis signals only on a
+    real modification. The error is in the safe direction - the
+    transaction retries rather than running on a stale read.
+11. **A key expiring does not abort a watching transaction**, which
+    matches Redis 6 and later but not earlier versions.
+12. **`CLIENT` covers only the calling connection.** `LIST` and `KILL`
+    would need a connection registry the command layer can walk;
+    connections live in the event loop instead.
 
 ## 7. Suggested build order
 
@@ -294,31 +339,37 @@ All eight items are built; see [command-expansion.md](command-expansion.md).
 10. ~~`INFO` and `CONFIG GET`/`SET`, plus a config file.~~ **Done** —
     Klyro can be operated now. See [configuration.md](configuration.md).
 
-**Tier 3 — the protocol rewrite and what it unblocks**
+**Tier 3 — the protocol rewrite and what it unblocks — Done**
 
 11. ~~RESP2 parser and serializer, replacing the line protocol.~~
     **Done**, with RESP3 as well. See
     [resp-protocol.md](resp-protocol.md). Stock clients work, values are
     binary-safe, and the silent truncation is gone.
-12. **`MULTI`/`EXEC`/`WATCH`.** Now the top of the list. The command
-    layer already returns a `Reply` value rather than writing to a
-    socket, which is most of what queuing a transaction needs; what is
-    missing is per-connection state and a watched-key registry.
-13. **Pub/sub, then blocking commands** (`BLPOP` and friends). Both need
-    the event loop to be able to park a connection and wake it, which is
-    the one piece of machinery RESP did not bring with it. RESP3's push
-    type is already specified in `resp.rs`'s design, though unimplemented.
+12. ~~`MULTI`/`EXEC`/`WATCH`.~~ **Done.**
+13. ~~Pub/sub, then blocking commands~~ (`BLPOP` and friends).
+    **Done.** All three needed the same thing - per-connection state,
+    and an event loop that can park a connection and wake it - which is
+    why they landed together. See
+    [connection-state.md](connection-state.md).
 
 **Tier 4 — separable large efforts**
 
-14. `maxmemory` + LRU/LFU eviction. Required for cache use, and the
-    measurement half is already done: `INFO memory` reports real usage
-    from the counting allocator.
+14. ~~`maxmemory` + LRU/LFU eviction.~~ **Done.** See section 4 and
+    [eviction.md](eviction.md).
 15. AOF with `appendfsync`, plus forked `BGSAVE`.
 16. Replication (`REPLICAOF`, `PSYNC`), then Sentinel, then Cluster.
 17. `AUTH`/ACL, then TLS.
 18. Streams; skip-list sorted set; `epoll`/`kqueue`; bitmaps and HLL.
 
+**Now the top of the list:** item 17, `AUTH`. It is the smallest of the
+four remaining subsystems and the one whose absence is hardest to work
+around - the server binds `0.0.0.0` with full read/write access to
+anyone who can reach the port, so today the only safe deployment is one
+nobody else can route to.
+
 **Cheap cleanups worth doing along the way:** `SCAN`'s cursor still
-sorts the whole keyspace per call (item in section 5), and the expired-key
-sweep is still a full scan rather than Redis's sampling.
+sorts the whole keyspace per call (item in section 5); the expired-key
+sweep is still a full scan rather than Redis's sampling, which the
+eviction sampler makes a small job now; and `notify-keyspace-events` is
+also small, because the write signal it needs already exists, in
+[keyspec.rs](../src/commands/keyspec.rs).

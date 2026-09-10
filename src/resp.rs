@@ -66,6 +66,13 @@ pub enum Reply {
     Map(Vec<(Reply, Reply)>),
     /// Unordered unique items: an array in RESP2, a set in RESP3.
     Set(Vec<Reply>),
+    /// An out-of-band message - a pub/sub delivery, or the
+    /// confirmation of a (un)subscribe. RESP3 gives these their own
+    /// type so a client can tell them from the reply to whatever it
+    /// asked; RESP2 has no such marker, which is why a RESP2
+    /// connection may not run anything but subscribe commands while it
+    /// holds a subscription.
+    Push(Vec<Reply>),
     /// A number that is a *score*, not a count: a bulk string in RESP2,
     /// the double type in RESP3.
     Double(f64),
@@ -105,6 +112,15 @@ impl Reply {
 
     pub fn array(items: Vec<Reply>) -> Reply {
         Reply::Array(items)
+    }
+
+    /// An out-of-band frame whose first element names the kind of
+    /// message, the shape every pub/sub frame takes.
+    pub fn push(kind: &'static str, rest: Vec<Reply>) -> Reply {
+        let mut items = Vec::with_capacity(rest.len() + 1);
+        items.push(Reply::bulk(kind));
+        items.extend(rest);
+        Reply::Push(items)
     }
 
     /// An array of bulk strings, the shape most listing commands return.
@@ -156,6 +172,9 @@ pub fn encode(reply: &Reply, protocol: Protocol, out: &mut Vec<u8>) {
         Reply::Array(items) => encode_aggregate(b'*', items, protocol, out),
         Reply::Set(items) => {
             encode_aggregate(if resp3 { b'~' } else { b'*' }, items, protocol, out)
+        }
+        Reply::Push(items) => {
+            encode_aggregate(if resp3 { b'>' } else { b'*' }, items, protocol, out)
         }
         Reply::Map(pairs) => {
             if resp3 {
@@ -484,6 +503,19 @@ mod tests {
         assert_eq!(encoded(Reply::Nil), "$-1\r\n");
         assert_eq!(encoded3(Reply::Nil), "_\r\n");
         assert_eq!(encoded3(Reply::NilArray), "_\r\n");
+    }
+
+    #[test]
+    fn a_push_is_marked_only_in_resp3() {
+        let message = Reply::push("message", vec![Reply::bulk("news"), Reply::bulk("hi")]);
+        assert_eq!(
+            encoded(message.clone()),
+            "*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$2\r\nhi\r\n"
+        );
+        assert_eq!(
+            encoded3(message),
+            ">3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$2\r\nhi\r\n"
+        );
     }
 
     #[test]

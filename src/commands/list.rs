@@ -9,13 +9,13 @@ use crate::util::bytes::{eq_ignore_case, Bytes};
 
 /// Which end of a list an operation works on.
 #[derive(Clone, Copy, PartialEq)]
-enum End {
+pub(super) enum End {
     Left,
     Right,
 }
 
 impl End {
-    fn parse(token: &[u8]) -> Option<End> {
+    pub(super) fn parse(token: &[u8]) -> Option<End> {
         if eq_ignore_case(token, "LEFT") {
             Some(End::Left)
         } else if eq_ignore_case(token, "RIGHT") {
@@ -38,6 +38,48 @@ fn push_to(l: &mut list::List, end: End, value: Bytes) {
         End::Left => l.push_front(value),
         End::Right => l.push_back(value),
     }
+}
+
+/// Pops one value off `end` of the list at `key`, dropping the key if
+/// that emptied it. `None` when the key holds no list or the list is
+/// empty; the caller is expected to have type-checked the key already.
+///
+/// Shared with the blocking pops, which is the whole reason it exists:
+/// BLPOP has to be exactly LPOP when the list is not empty.
+pub(super) fn pop_one(app: &mut App, key: &[u8], end: End) -> Option<Bytes> {
+    let value = app
+        .store
+        .get_existing_list(key)
+        .and_then(|l| pop_from(l, end))?;
+    app.store.mark_dirty();
+    app.store.delete_if_empty(key);
+    Some(value)
+}
+
+/// Moves one value from `source`'s `from` end to `destination`'s `to`
+/// end - the body of RPOPLPUSH, LMOVE, and both blocking spellings.
+pub(super) fn move_one(
+    app: &mut App,
+    source: &[u8],
+    destination: &[u8],
+    from: End,
+    to: End,
+) -> Option<Bytes> {
+    let value = app
+        .store
+        .get_existing_list(source)
+        .and_then(|l| pop_from(l, from))?;
+    app.store.mark_dirty();
+    // Rotating a list onto itself is legal, so push before the
+    // empty-cleanup runs - otherwise a one-element self-move would
+    // delete the key it is about to write back into.
+    let target = app
+        .store
+        .get_or_create_list(destination)
+        .expect("type checked");
+    push_to(target, to, value.clone());
+    app.store.delete_if_empty(source);
+    Some(value)
 }
 
 pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Reply {
@@ -212,27 +254,11 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
                     _ => return Err(syntax_error()),
                 }
             };
-            let (source, destination) = (&argv[1], &argv[2]);
-            check_type(app, source, StoreType::List)?;
-            check_type(app, destination, StoreType::List)?;
+            let (source, destination) = (argv[1].clone(), argv[2].clone());
+            check_type(app, &source, StoreType::List)?;
+            check_type(app, &destination, StoreType::List)?;
 
-            let Some(value) = app
-                .store
-                .get_existing_list(source)
-                .and_then(|l| pop_from(l, from))
-            else {
-                return Ok(Reply::Nil);
-            };
-            // Rotating a list onto itself is legal, so push before the
-            // empty-cleanup runs - otherwise a one-element self-move
-            // would delete the key it is about to write back into.
-            let target = app
-                .store
-                .get_or_create_list(destination)
-                .expect("type checked");
-            push_to(target, to, value.clone());
-            app.store.delete_if_empty(source);
-            Ok(Reply::Bulk(value))
+            Ok(move_one(app, &source, &destination, from, to).map_or(Reply::Nil, Reply::Bulk))
         }
 
         _ => Ok(Reply::error("ERR unknown command")),

@@ -1,0 +1,361 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-canvas: #07080a;
+  --color-surface: #0c0e12;
+  --color-surface-2: #12151b;
+  --color-line: #1c2029;
+  --color-line-soft: #15181e;
+  --color-ink: #eceef2;
+  --color-ink-muted: #969ca8;
+  --color-ink-faint: #6b7280;
+  --color-brand: #8b5cf6;
+  --color-brand-bright: #a78bfa;
+  --color-brand-dim: #5b3fd6;
+  --color-cyan: #22d3ee;
+  --color-mint: #34d399;
+  --color-amber: #fbbf24;
+
+  --font-mono: var(--font-mono-jet), ui-monospace, "SFMono-Regular", Menlo,
+    monospace;
+
+  --radius-card: 14px;
+}
+
+:root {
+  color-scheme: dark;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 6rem;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-brand) 45%, transparent);
+  color: #fff;
+}
+
+/* Thin, unobtrusive scrollbars for the docs sidebar and code blocks. */
+.scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+.scroll-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-slim::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 999px;
+}
+
+/* The faint blueprint grid used behind the hero and the CTA band. */
+.bg-grid {
+  background-image: linear-gradient(
+      to right,
+      color-mix(in oklab, var(--color-line) 60%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--color-line) 60%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 64px 64px;
+}
+
+.bg-radial-fade {
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 30%, transparent 75%);
+}
+
+.text-gradient {
+  background: linear-gradient(
+    100deg,
+    var(--color-ink) 0%,
+    var(--color-brand-bright) 55%,
+    var(--color-cyan) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ---------------------------------------------------------------
+   Documentation prose. Pages write plain HTML inside `.doc-body`
+   and pick up spacing, colour, and type scale from here.
+   --------------------------------------------------------------- */
+
+.doc-body {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--color-ink-muted);
+}
+
+.doc-body > * + * {
+  margin-top: 1.05rem;
+}
+
+.doc-body h2 {
+  margin-top: 3rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--color-ink);
+  scroll-margin-top: 6rem;
+}
+
+.doc-body h3 {
+  margin-top: 2.25rem;
+  font-size: 1.075rem;
+  font-weight: 600;
+  color: var(--color-ink);
+  scroll-margin-top: 6rem;
+}
+
+.doc-body h4 {
+  margin-top: 1.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.doc-body strong {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+
+.doc-body a {
+  color: var(--color-brand-bright);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in oklab, var(--color-brand) 45%, transparent);
+}
+
+.doc-body a:hover {
+  text-decoration-color: var(--color-brand-bright);
+}
+
+.doc-body ul,
+.doc-body ol {
+  padding-left: 1.15rem;
+}
+
+.doc-body ul {
+  list-style: disc;
+}
+
+.doc-body ol {
+  list-style: decimal;
+}
+
+.doc-body li {
+  margin-top: 0.4rem;
+}
+
+.doc-body li::marker {
+  color: var(--color-ink-faint);
+}
+
+.doc-body :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.845em;
+  color: var(--color-brand-bright);
+  background: color-mix(in oklab, var(--color-brand) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-brand) 20%, transparent);
+  border-radius: 5px;
+  padding: 0.1em 0.36em;
+  white-space: nowrap;
+}
+
+.doc-body hr {
+  border-color: var(--color-line-soft);
+  margin-block: 2.5rem;
+}
+
+.doc-body blockquote {
+  border-left: 2px solid var(--color-brand);
+  padding-left: 1rem;
+  color: var(--color-ink-muted);
+}
+
+/* Cards and buttons inside prose keep their own affordances. */
+.doc-body a.doc-card,
+.doc-body a.doc-card:hover {
+  text-decoration: none;
+}
+
+/* The Steps component draws its own numbers in a badge. */
+.doc-body ol.doc-steps {
+  list-style: none;
+  padding-left: 2rem;
+}
+
+.doc-body ol.doc-steps > li {
+  margin-top: 0;
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* ---------------------------------------------------------------
+   shadcn/ui semantic tokens, mapped onto the Klyro palette above.
+   The site is dark-only: <html> always carries `class="dark"`, so
+   these are the values every shadcn component actually resolves.
+   --------------------------------------------------------------- */
+.dark {
+  --background: var(--color-canvas);
+  --foreground: var(--color-ink);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-surface);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-surface-2);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-surface-2);
+  --muted-foreground: var(--color-ink-muted);
+  --accent: var(--color-surface-2);
+  --accent-foreground: var(--color-ink);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-brand);
+  --chart-1: var(--color-brand);
+  --chart-2: var(--color-cyan);
+  --chart-3: var(--color-mint);
+  --chart-4: var(--color-amber);
+  --chart-5: var(--color-brand-bright);
+  --sidebar: var(--color-surface);
+  --sidebar-foreground: var(--color-ink);
+  --sidebar-primary: var(--color-brand);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--color-surface-2);
+  --sidebar-accent-foreground: var(--color-ink);
+  --sidebar-border: var(--color-line);
+  --sidebar-ring: var(--color-brand);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

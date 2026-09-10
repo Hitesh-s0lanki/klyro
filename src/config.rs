@@ -10,6 +10,8 @@ use std::fmt;
 use std::fs;
 use std::time::Duration;
 
+use crate::evict::Policy;
+
 pub const DEFAULT_PORT: u16 = 7171;
 pub const DEFAULT_DUMP_PATH: &str = "klyro.dump";
 
@@ -60,6 +62,17 @@ pub struct Config {
     /// Ceiling on score/member pairs in a single ZADD.
     pub zadd_max_pairs: usize,
 
+    // --- memory limit ---
+    /// Bytes the process may hold before eviction starts, or 0 for no
+    /// limit. Measured across the whole process, not just the keyspace.
+    pub maxmemory: usize,
+    /// What to evict once `maxmemory` is reached.
+    pub maxmemory_policy: Policy,
+    /// Keys drawn per eviction round. Larger is closer to true LRU/LFU
+    /// and costs more per eviction; Redis's default of 5 is within a
+    /// couple of percent of exact on realistic traffic.
+    pub maxmemory_samples: usize,
+
     // --- memory indexes ---
     /// Ceiling on a memory query's TOPK.
     pub mem_max_topk: usize,
@@ -100,6 +113,9 @@ impl Default for Config {
             client_output_buffer_limit: 256 * 1024 * 1024,
             scan_default_count: 10,
             zadd_max_pairs: 128,
+            maxmemory: 0,
+            maxmemory_policy: Policy::NoEviction,
+            maxmemory_samples: 5,
             mem_max_topk: 100,
             mem_max_candidates: 500,
             mem_max_scan: 1_000_000,
@@ -125,6 +141,9 @@ pub const PARAMETERS: &[&str] = &[
     "client-output-buffer-limit",
     "scan-default-count",
     "zadd-max-pairs",
+    "maxmemory",
+    "maxmemory-policy",
+    "maxmemory-samples",
     "mem-max-topk",
     "mem-max-candidates",
     "mem-max-scan",
@@ -150,6 +169,29 @@ fn non_negative(value: &str) -> Result<u64, SetError> {
     value.parse::<u64>().map_err(|_| SetError::BadValue)
 }
 
+/// A byte count, with Redis's size suffixes: `k`/`m`/`g` are powers of
+/// a thousand and `kb`/`mb`/`gb` powers of 1024, which reads backwards
+/// but is what every Redis config in existence means. A bare number is
+/// bytes, and 0 is a real value meaning "no limit".
+fn parse_size(value: &str) -> Result<u64, SetError> {
+    const SUFFIXES: &[(&str, u64)] = &[
+        ("kb", 1024),
+        ("mb", 1024 * 1024),
+        ("gb", 1024 * 1024 * 1024),
+        ("k", 1_000),
+        ("m", 1_000_000),
+        ("g", 1_000_000_000),
+    ];
+    let lower = value.trim().to_ascii_lowercase();
+    for (suffix, scale) in SUFFIXES {
+        if let Some(number) = lower.strip_suffix(suffix) {
+            let count: u64 = number.trim().parse().map_err(|_| SetError::BadValue)?;
+            return count.checked_mul(*scale).ok_or(SetError::BadValue);
+        }
+    }
+    non_negative(&lower)
+}
+
 impl Config {
     /// The current value of `name`, formatted the way CONFIG GET
     /// reports it. `None` for an unknown parameter.
@@ -166,6 +208,9 @@ impl Config {
             "client-output-buffer-limit" => self.client_output_buffer_limit.to_string(),
             "scan-default-count" => self.scan_default_count.to_string(),
             "zadd-max-pairs" => self.zadd_max_pairs.to_string(),
+            "maxmemory" => self.maxmemory.to_string(),
+            "maxmemory-policy" => self.maxmemory_policy.name().to_string(),
+            "maxmemory-samples" => self.maxmemory_samples.to_string(),
             "mem-max-topk" => self.mem_max_topk.to_string(),
             "mem-max-candidates" => self.mem_max_candidates.to_string(),
             "mem-max-scan" => self.mem_max_scan.to_string(),
@@ -241,6 +286,21 @@ impl Config {
             }
             "zadd-max-pairs" => {
                 self.zadd_max_pairs = positive(value)? as usize;
+                Ok(())
+            }
+            // 0 is "no limit". Accepts the size suffixes Redis does,
+            // because this is the one parameter people write by hand
+            // and `100mb` is what they reach for.
+            "maxmemory" => {
+                self.maxmemory = parse_size(value)? as usize;
+                Ok(())
+            }
+            "maxmemory-policy" => {
+                self.maxmemory_policy = Policy::parse(value).ok_or(SetError::BadValue)?;
+                Ok(())
+            }
+            "maxmemory-samples" => {
+                self.maxmemory_samples = positive(value)? as usize;
                 Ok(())
             }
             "mem-max-topk" => {

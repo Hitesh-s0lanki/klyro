@@ -15,8 +15,12 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
   RESP2 and RESP3. Values are binary-safe, replies are never silently
   truncated, and redis-py, go-redis, and ioredis all work unmodified.
   See [resp-protocol.md](resp-protocol.md).
-- No transactions (`MULTI`/`EXEC`).
-- No pub/sub (`SUBSCRIBE`/`PUBLISH`).
+- ~~No transactions (`MULTI`/`EXEC`)~~ **Done (2026-09-10).** With
+  `WATCH` for optimistic locking, and `RESET`.
+- ~~No pub/sub (`SUBSCRIBE`/`PUBLISH`)~~ **Done (2026-09-10).** Channel
+  and pattern subscriptions, RESP3 push frames, and the blocking pops
+  (`BLPOP` and family) that needed the same connection-parking
+  machinery. See [connection-state.md](connection-state.md).
 - ~~No official client library or CLI~~ **Moot (2026-09-10).** Any
   Redis client works, `redis-cli` included, so the three hand-written
   clients were retired. See [client-libraries.md](client-libraries.md).
@@ -60,9 +64,10 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 - No authentication or ACLs - anyone who can reach the port has full
   read/write access.
 - No TLS.
-- No memory limits or eviction policies (LRU/LFU) - the dataset grows
-  until the process runs out of memory. `INFO memory` measures it, but
-  nothing acts on the measurement.
+- ~~No memory limits or eviction policies (LRU/LFU)~~ **Done
+  (2026-09-10).** `maxmemory` with Redis's eight policies, approximate
+  sampling, and an `OOM` refusal for the writes that could grow the
+  keyspace. See [eviction.md](eviction.md).
 - ~~No metrics/observability~~ **Done (2026-09-10).** `INFO` reports
   six sections, including real memory use from a counting allocator and
   a read-command hit ratio. Still no logging beyond startup/shutdown
@@ -82,12 +87,17 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 ## Software engineering
 
 - ~~No automated test suite~~ **Done (2026-09-09, extended
-  2026-09-10).** See [tests/](../tests/) and `cargo test` — 248 tests
+  2026-09-10).** See [tests/](../tests/) and `cargo test` — 461 tests
   covering every command, WRONGTYPE, multi-value push/add,
   `KEYS`/`SCAN` pattern matching, INFO/CONFIG, config-file loading,
-  RESP framing, and a full persistence round-trip.
-  Still no CI (nothing runs `cargo test` automatically on push).
-- No license file.
+  RESP framing, transactions, pub/sub, the blocking pops, and a full
+  persistence round-trip.
+- ~~No CI~~ **Done (2026-09-10).** `.github/workflows/ci.yml` runs
+  `cargo fmt --check`, `cargo clippy -D warnings`, the test suite, and
+  a release build on every push and pull request, plus the site's
+  typecheck and build. The Docker workflow still only runs on a merge
+  to main.
+- ~~No license file~~ **Done (2026-09-10).** MIT.
 
 ## Beyond Redis compatibility
 
@@ -111,10 +121,20 @@ not block, or wait on, any of it.
 6. ~~**Values with embedded spaces in List/Set/Zset**~~ Done - see
    above.
 7. ~~**A binary-safe protocol (RESP-like)**~~ Done - see above.
-8. **Transactions (`MULTI`/`EXEC`/`WATCH`)** - now the top of the list.
-   The command layer already returns a reply value instead of writing to
-   a socket, which is most of what queuing a transaction needs.
-9. **Pub/sub, then blocking commands** - both need the event loop to
-   park and wake a connection, the one piece RESP did not bring.
-10. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
-    separable efforts; not blocking anything else on this list.
+8. ~~**Transactions (`MULTI`/`EXEC`/`WATCH`)**~~ Done - see above.
+9. ~~**Pub/sub, then blocking commands**~~ Done - see above. All three
+   landed together, because all three needed the same thing: per-
+   connection state, and an event loop that can park a connection.
+10. ~~**`maxmemory` with an eviction policy**~~ Done - see above. Klyro
+    works as a bounded cache now.
+11. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
+    separable efforts; not blocking anything else on this list. Auth is
+    the smallest of the three and now the top of the list: it is what
+    stands between Klyro and running anywhere a stranger can reach the
+    port.
+
+Two cheap cleanups are worth doing along the way, both called out in
+[redis-feature-gap.md](redis-feature-gap.md) section 5: `SCAN`'s cursor
+still sorts the whole keyspace on every call, and the expired-key sweep
+is still a full scan rather than Redis's sampling. The sampling
+machinery eviction needed makes the second one a small job now.

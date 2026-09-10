@@ -1,9 +1,17 @@
 //! The in-memory keyspace: maps keys to typed values (string, list,
 //! hash, set, or sorted set), with optional per-key expiry (lazy on
 //! lookup plus a periodic active sweep).
+//!
+//! Beside the map sit two vectors of keys - every key, and the subset
+//! carrying an expiry. They exist so eviction can draw a random sample
+//! in constant time: std's `HashMap` has no indexable bucket, and
+//! walking the whole keyspace to pick one victim would make every
+//! write under `maxmemory` cost O(N). They are maintained by
+//! `insert_entry`/`remove_entry`, which are the only two places the map
+//! itself grows or shrinks.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::types::hash::Hash;
 use crate::types::list::List;
@@ -77,14 +85,116 @@ impl Value {
     }
 }
 
+/// What a key looks like to the eviction policies.
+///
+/// `at` is a reading of the store's logical clock rather than a wall
+/// time, so LRU ordering is exact and a clock adjustment cannot reorder
+/// it. `freq` is Redis's logarithmic frequency counter: it saturates at
+/// 255, climbs ever more slowly, and decays with time, so a key that
+/// was hot an hour ago does not outlive one that is hot now.
+#[derive(Clone, Copy)]
+struct Access {
+    at: u64,
+    freq: u8,
+    /// The minute, on the store's clock, `freq` was last decayed.
+    decayed_at: u32,
+}
+
+/// The counter a new key starts at. Above zero on purpose: a key that
+/// was just written has no history, and starting at zero would make it
+/// the first victim of the very command that created it.
+const LFU_INIT: u8 = 5;
+
+/// How steeply the counter's climb flattens out. Redis's default; not
+/// exposed as a parameter, because the two knobs around it are the ones
+/// nobody in practice turns.
+const LFU_LOG_FACTOR: f64 = 10.0;
+
+/// Minutes of idleness that halve the counter.
+const LFU_DECAY_MINUTES: u32 = 1;
+
+/// How many draws RANDOMKEY makes before reporting the database empty.
+/// A draw can land on a key whose TTL has passed but which the sweep
+/// has not reached, and a handful of retries makes that vanishingly
+/// unlikely to be the whole answer.
+const RANDOM_KEY_ATTEMPTS: usize = 20;
+
+/// One key as the eviction policies see it.
+pub struct Candidate {
+    pub key: Bytes,
+    /// The store clock when it was last accessed; smaller is older.
+    pub last_access: u64,
+    /// The frequency counter, already decayed to now.
+    pub freq: u8,
+    /// Its deadline, for `volatile-ttl`. Always `Some` for a candidate
+    /// drawn from the volatile index.
+    pub expire_at: Option<SystemTime>,
+}
+
+impl Access {
+    fn new(clock: u64, minute: u32) -> Access {
+        Access {
+            at: clock,
+            freq: LFU_INIT,
+            decayed_at: minute,
+        }
+    }
+
+    /// The counter as it stands at `minute`, halved once per
+    /// `LFU_DECAY_MINUTES` of idleness. Pure, so sampling can ask
+    /// without writing the answer back.
+    fn decayed_freq(&self, minute: u32) -> u8 {
+        let elapsed = minute.saturating_sub(self.decayed_at);
+        let halvings = elapsed / LFU_DECAY_MINUTES;
+        if halvings == 0 {
+            return self.freq;
+        }
+        // Past eight halvings there is nothing left to halve.
+        if halvings >= 8 {
+            return 0;
+        }
+        self.freq >> halvings
+    }
+
+    /// Records one access: decay first, then a probabilistic increment
+    /// whose odds fall as the counter rises.
+    fn record_hit(&mut self, clock: u64, minute: u32) {
+        self.at = clock;
+        self.freq = self.decayed_freq(minute);
+        self.decayed_at = minute;
+        if self.freq == u8::MAX {
+            return;
+        }
+        let base = (self.freq as f64) - (LFU_INIT as f64);
+        let odds = 1.0 / (base.max(0.0) * LFU_LOG_FACTOR + 1.0);
+        if crate::util::rand::unit_interval() < odds {
+            self.freq += 1;
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Entry {
     value: Value,
     expire_at: Option<SystemTime>, // None = never expires
+    /// Where this key sits in `Store::keys`.
+    slot: usize,
+    /// Where it sits in `Store::volatile`, while it has an expiry.
+    volatile_slot: Option<usize>,
+    access: Access,
 }
 
 pub struct Store {
     map: HashMap<Bytes, Entry>,
+    /// Every key in `map`, in no particular order, for random sampling.
+    keys: Vec<Bytes>,
+    /// The subset of `keys` that carries an expiry, so the `volatile-*`
+    /// policies sample from the keys they are allowed to evict rather
+    /// than drawing from the whole keyspace and discarding most of it.
+    volatile: Vec<Bytes>,
+    /// Ticks once per keyspace access. Only the ordering matters.
+    clock: u64,
+    started: Instant,
     dirty: usize,
     expired: u64,
     lookup_hits: u64,
@@ -95,10 +205,108 @@ impl Store {
     pub fn new() -> Self {
         Store {
             map: HashMap::new(),
+            keys: Vec::new(),
+            volatile: Vec::new(),
+            clock: 0,
+            started: Instant::now(),
             dirty: 0,
             expired: 0,
             lookup_hits: 0,
             lookup_misses: 0,
+        }
+    }
+
+    fn minute(&self) -> u32 {
+        (self.started.elapsed().as_secs() / 60) as u32
+    }
+
+    /// Installs `entry` at `key`, taking over whatever was there.
+    ///
+    /// An overwrite keeps the old key's slots, so replacing a value
+    /// does not churn either index vector; a fresh key is appended.
+    fn insert_entry(&mut self, key: &[u8], mut entry: Entry) {
+        match self.map.get(key) {
+            Some(previous) => {
+                entry.slot = previous.slot;
+                entry.volatile_slot = previous.volatile_slot;
+            }
+            None => {
+                entry.slot = self.keys.len();
+                entry.volatile_slot = None;
+                self.keys.push(key.to_vec());
+            }
+        }
+        self.map.insert(key.to_vec(), entry);
+        self.sync_volatile(key);
+    }
+
+    /// Builds an entry for a value that has just been created, with a
+    /// fresh access record. The slots are filled in by `insert_entry`.
+    fn fresh(&self, value: Value, expire_at: Option<SystemTime>) -> Entry {
+        Entry {
+            value,
+            expire_at,
+            slot: 0,
+            volatile_slot: None,
+            access: Access::new(self.clock, self.minute()),
+        }
+    }
+
+    /// Drops `key` and repairs both index vectors.
+    fn remove_entry(&mut self, key: &[u8]) -> Option<Entry> {
+        let entry = self.map.remove(key)?;
+        self.keys.swap_remove(entry.slot);
+        // swap_remove moved the last key into the hole, unless the hole
+        // was the last key - in which case there is nothing to repair.
+        if let Some(moved) = self.keys.get(entry.slot).cloned() {
+            if let Some(e) = self.map.get_mut(&moved) {
+                e.slot = entry.slot;
+            }
+        }
+        if let Some(slot) = entry.volatile_slot {
+            self.detach_volatile(slot);
+        }
+        Some(entry)
+    }
+
+    /// The same repair, for the volatile index.
+    fn detach_volatile(&mut self, slot: usize) {
+        self.volatile.swap_remove(slot);
+        if let Some(moved) = self.volatile.get(slot).cloned() {
+            if let Some(e) = self.map.get_mut(&moved) {
+                e.volatile_slot = Some(slot);
+            }
+        }
+    }
+
+    /// Brings `key`'s membership of the volatile index in line with
+    /// whether it currently carries an expiry. Called wherever
+    /// `expire_at` is written.
+    fn sync_volatile(&mut self, key: &[u8]) {
+        let Some(entry) = self.map.get(key) else {
+            return;
+        };
+        match (entry.expire_at.is_some(), entry.volatile_slot) {
+            (true, None) => {
+                let slot = self.volatile.len();
+                self.volatile.push(key.to_vec());
+                self.map.get_mut(key).expect("just read").volatile_slot = Some(slot);
+            }
+            (false, Some(slot)) => {
+                self.map.get_mut(key).expect("just read").volatile_slot = None;
+                self.detach_volatile(slot);
+            }
+            _ => {}
+        }
+    }
+
+    /// Records an access against the eviction policies. Every read or
+    /// write that reaches a value goes through here.
+    fn touch(&mut self, key: &[u8]) {
+        self.clock += 1;
+        let (clock, minute) = (self.clock, self.minute());
+        if let Some(entry) = self.map.get_mut(key) {
+            entry.access.record_hit(clock, minute);
         }
     }
 
@@ -114,7 +322,7 @@ impl Store {
     fn expire_if_due(&mut self, key: &[u8]) {
         let now = SystemTime::now();
         if self.map.get(key).is_some_and(|e| !Self::is_live(e, now)) {
-            self.map.remove(key);
+            self.remove_entry(key);
             self.dirty += 1;
             self.expired += 1;
         }
@@ -135,6 +343,9 @@ impl Store {
         self.expire_if_due(key);
         let found = self.map.contains_key(key);
         self.account(found);
+        if found {
+            self.touch(key);
+        }
         self.map.get(key)
     }
 
@@ -142,6 +353,9 @@ impl Store {
         self.expire_if_due(key);
         let found = self.map.contains_key(key);
         self.account(found);
+        if found {
+            self.touch(key);
+        }
         self.map.get_mut(key)
     }
 
@@ -159,11 +373,13 @@ impl Store {
     }
 
     /// How many live keys carry an expiry, for INFO's keyspace line.
+    /// Walks the volatile index rather than the keyspace, so it costs
+    /// what it measures rather than what the whole database holds.
     pub fn volatile_size(&self) -> usize {
         let now = SystemTime::now();
-        self.map
-            .values()
-            .filter(|e| Self::is_live(e, now) && e.expire_at.is_some())
+        self.volatile
+            .iter()
+            .filter(|k| self.map.get(*k).is_some_and(|e| Self::is_live(e, now)))
             .count()
     }
 
@@ -217,7 +433,7 @@ impl Store {
         if self.find(key).is_none() {
             return false; // also lazily expires
         }
-        self.map.remove(key);
+        self.remove_entry(key);
         self.dirty += 1;
         true
     }
@@ -228,7 +444,7 @@ impl Store {
             .find(key)
             .is_some_and(|e| e.value.is_empty_collection());
         if should_delete {
-            self.map.remove(key);
+            self.remove_entry(key);
             self.dirty += 1;
         }
     }
@@ -240,6 +456,7 @@ impl Store {
         match self.find_mut(key) {
             Some(e) => {
                 e.expire_at = at;
+                self.sync_volatile(key);
                 self.dirty += 1;
                 true
             }
@@ -283,8 +500,8 @@ impl Store {
         if key == new_key {
             return true;
         }
-        let entry = self.map.remove(key).expect("find() proved it is live");
-        self.map.insert(new_key.to_vec(), entry);
+        let entry = self.remove_entry(key).expect("find() proved it is live");
+        self.insert_entry(new_key, entry);
         self.dirty += 1;
         true
     }
@@ -298,7 +515,7 @@ impl Store {
             return Some(false);
         }
         let entry = self.map.get(key).expect("find() proved it is live").clone();
-        self.map.insert(dest.to_vec(), entry);
+        self.insert_entry(dest, entry);
         self.dirty += 1;
         Some(true)
     }
@@ -307,23 +524,30 @@ impl Store {
     pub fn flush(&mut self) -> usize {
         let removed = self.map.len();
         self.map.clear();
+        self.keys.clear();
+        self.volatile.clear();
         self.dirty += 1;
         removed
     }
 
     /// Some live key chosen pseudo-randomly, or `None` if empty.
+    ///
+    /// Draws from the key index rather than collecting the keyspace, so
+    /// RANDOMKEY costs the same on a large database as on a small one.
+    /// An expired-but-unswept key can be drawn, so a few draws are
+    /// tried before giving up and reporting the database as empty.
     pub fn random_key(&mut self) -> Option<Bytes> {
         let now = SystemTime::now();
-        let live: Vec<&Bytes> = self
-            .map
-            .iter()
-            .filter(|(_, e)| Self::is_live(e, now))
-            .map(|(k, _)| k)
-            .collect();
-        if live.is_empty() {
-            return None;
+        for _ in 0..RANDOM_KEY_ATTEMPTS {
+            if self.keys.is_empty() {
+                return None;
+            }
+            let key = &self.keys[crate::util::rand::below(self.keys.len())];
+            if self.map.get(key).is_some_and(|e| Self::is_live(e, now)) {
+                return Some(key.clone());
+            }
         }
-        Some(live[crate::util::rand::below(live.len())].clone())
+        None
     }
 
     /// Live key count, skipping any expired-but-not-yet-swept entries so
@@ -342,10 +566,73 @@ impl Store {
             .map(|(k, _)| k.clone())
             .collect();
         for key in expired {
-            self.map.remove(&key);
+            self.remove_entry(&key);
             self.dirty += 1;
             self.expired += 1;
         }
+    }
+
+    /// A pseudo-random sample of live keys for the eviction policies to
+    /// choose a victim from, drawn either from the whole keyspace or
+    /// from the keys carrying an expiry.
+    ///
+    /// Sampling rather than sorting is what Redis does, and for the
+    /// same reason: an exact answer would mean an ordered structure
+    /// updated on every access, and the approximate answer from a
+    /// handful of draws is close enough to it that the difference does
+    /// not show up in a hit rate.
+    ///
+    /// Draws may repeat, so fewer than `count` distinct candidates can
+    /// come back; that costs a little accuracy, never correctness.
+    pub fn sample(&self, volatile_only: bool, count: usize) -> Vec<Candidate> {
+        let pool = if volatile_only {
+            &self.volatile
+        } else {
+            &self.keys
+        };
+        if pool.is_empty() || count == 0 {
+            return Vec::new();
+        }
+        let now = SystemTime::now();
+        let minute = self.minute();
+        let mut sampled = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key = &pool[crate::util::rand::below(pool.len())];
+            let Some(entry) = self.map.get(key) else {
+                continue;
+            };
+            // An expired-but-unswept key is about to go anyway, so
+            // reporting it as a candidate would credit the sweep's work
+            // to eviction. Skip it and let the sweep have it.
+            if !Self::is_live(entry, now) {
+                continue;
+            }
+            sampled.push(Candidate {
+                key: key.clone(),
+                last_access: entry.access.at,
+                freq: entry.access.decayed_freq(minute),
+                expire_at: entry.expire_at,
+            });
+        }
+        sampled
+    }
+
+    /// Whether any key is eligible for `volatile-*` eviction. Lets the
+    /// eviction loop give up at once rather than sampling an index it
+    /// already knows is empty.
+    pub fn volatile_is_empty(&self) -> bool {
+        self.volatile.is_empty()
+    }
+
+    /// Drops `key` because memory ran short. Separate from `del` so it
+    /// bypasses the hit/miss counters - an eviction is the server's
+    /// decision, not a lookup anybody made.
+    pub fn evict(&mut self, key: &[u8]) -> bool {
+        if self.remove_entry(key).is_none() {
+            return false;
+        }
+        self.dirty += 1;
+        true
     }
 
     /// Every live key, unfiltered (KEYS applies its own glob filter).
@@ -404,13 +691,8 @@ impl Store {
     /// overwrites regardless of the key's previous type.
     pub fn set_string(&mut self, key: &[u8], value: &[u8]) {
         self.dirty += 1;
-        self.map.insert(
-            key.to_vec(),
-            Entry {
-                value: Value::Str(value.to_vec()),
-                expire_at: None,
-            },
-        );
+        let entry = self.fresh(Value::Str(value.to_vec()), None);
+        self.insert_entry(key, entry);
     }
 
     /// Keeps any existing expiry, matching Redis's INCR/DECR/APPEND/
@@ -420,13 +702,8 @@ impl Store {
         if let Some(e) = self.find_mut(key) {
             e.value = Value::Str(value.to_vec());
         } else {
-            self.map.insert(
-                key.to_vec(),
-                Entry {
-                    value: Value::Str(value.to_vec()),
-                    expire_at: None,
-                },
-            );
+            let entry = self.fresh(Value::Str(value.to_vec()), None);
+            self.insert_entry(key, entry);
         }
     }
 
@@ -463,13 +740,8 @@ impl Store {
             return false;
         }
         self.dirty += 1;
-        self.map.insert(
-            key.to_vec(),
-            Entry {
-                value: Value::Memory(Box::new(memory)),
-                expire_at: None,
-            },
-        );
+        let entry = self.fresh(Value::Memory(Box::new(memory)), None);
+        self.insert_entry(key, entry);
         true
     }
 
@@ -515,13 +787,8 @@ macro_rules! define_collection_accessors {
                         }
                     }
                     None => {
-                        self.map.insert(
-                            key.to_vec(),
-                            Entry {
-                                value: Value::$variant($default),
-                                expire_at: None,
-                            },
-                        );
+                        let entry = self.fresh(Value::$variant($default), None);
+                        self.insert_entry(key, entry);
                     }
                 }
                 match &mut self.map.get_mut(key).unwrap().value {
@@ -653,5 +920,191 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 6);
+    }
+
+    /// Both index vectors have to agree with the map after every
+    /// operation, or eviction samples a key that is gone - or worse,
+    /// swap-remove leaves an entry pointing at somebody else's slot.
+    fn check_indexes(store: &Store) {
+        assert_eq!(store.keys.len(), store.map.len(), "key index lost a key");
+        for (slot, key) in store.keys.iter().enumerate() {
+            let entry = store
+                .map
+                .get(key)
+                .unwrap_or_else(|| panic!("key index holds {key:?}, the map does not"));
+            assert_eq!(entry.slot, slot, "{key:?} thinks it is elsewhere");
+        }
+
+        let volatile = store.map.values().filter(|e| e.expire_at.is_some()).count();
+        assert_eq!(store.volatile.len(), volatile, "volatile index is off");
+        for (slot, key) in store.volatile.iter().enumerate() {
+            let entry = store
+                .map
+                .get(key)
+                .expect("volatile index holds a stray key");
+            assert!(entry.expire_at.is_some(), "{key:?} has no expiry");
+            assert_eq!(entry.volatile_slot, Some(slot));
+        }
+    }
+
+    fn in_a_minute() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(60)
+    }
+
+    #[test]
+    fn the_key_index_survives_inserts_overwrites_and_deletes() {
+        let mut store = Store::new();
+        for i in 0..8 {
+            store.set_string(format!("k{i}").as_bytes(), b"v");
+        }
+        check_indexes(&store);
+
+        // An overwrite must not append a second slot for the same key.
+        store.set_string(b"k3", b"again");
+        assert_eq!(store.keys.len(), 8);
+        check_indexes(&store);
+
+        // Deleting from the middle is the case swap_remove has to
+        // repair; deleting the last key is the case it must not.
+        store.del(b"k2");
+        check_indexes(&store);
+        store.del(b"k7");
+        check_indexes(&store);
+        assert_eq!(store.size(), 6);
+    }
+
+    #[test]
+    fn the_volatile_index_tracks_expiry_being_set_and_cleared() {
+        let mut store = Store::new();
+        for i in 0..5 {
+            store.set_string(format!("k{i}").as_bytes(), b"v");
+        }
+        assert!(store.volatile_is_empty());
+
+        store.set_expire_at(b"k1", Some(in_a_minute()));
+        store.set_expire_at(b"k3", Some(in_a_minute()));
+        check_indexes(&store);
+        assert_eq!(store.volatile_size(), 2);
+
+        // PERSIST takes a key back out.
+        store.set_expire_at(b"k1", None);
+        check_indexes(&store);
+        assert_eq!(store.volatile_size(), 1);
+
+        // SET clears the expiry, so k3 leaves the index too.
+        store.set_string(b"k3", b"fresh");
+        check_indexes(&store);
+        assert!(store.volatile_is_empty());
+    }
+
+    #[test]
+    fn rename_copy_and_flush_leave_the_indexes_consistent() {
+        let mut store = Store::new();
+        store.set_string(b"src", b"v");
+        store.set_expire_at(b"src", Some(in_a_minute()));
+        store.set_string(b"other", b"v");
+
+        store.copy(b"src", b"dest", false);
+        check_indexes(&store);
+        assert_eq!(store.volatile_size(), 2, "a copy carries the TTL across");
+
+        store.rename(b"src", b"other");
+        check_indexes(&store);
+        assert_eq!(store.size(), 2);
+        assert!(store.has_expiry(b"other"), "rename carries the TTL across");
+
+        store.flush();
+        check_indexes(&store);
+        assert_eq!(store.size(), 0);
+    }
+
+    #[test]
+    fn the_expiry_sweep_leaves_the_indexes_consistent() {
+        let mut store = Store::new();
+        for i in 0..6 {
+            let key = format!("k{i}");
+            store.set_string(key.as_bytes(), b"v");
+            if i % 2 == 0 {
+                // Already past, so the sweep takes it.
+                store.set_expire_at(key.as_bytes(), Some(SystemTime::UNIX_EPOCH));
+            }
+        }
+        check_indexes(&store);
+
+        store.sweep_expired();
+        check_indexes(&store);
+        assert_eq!(store.size(), 3);
+        assert!(store.volatile_is_empty());
+    }
+
+    #[test]
+    fn sampling_draws_from_the_pool_the_policy_asked_for() {
+        let mut store = Store::new();
+        for i in 0..20 {
+            let key = format!("k{i}");
+            store.set_string(key.as_bytes(), b"v");
+            if i < 5 {
+                store.set_expire_at(key.as_bytes(), Some(in_a_minute()));
+            }
+        }
+
+        let sampled = store.sample(false, 8);
+        assert!(!sampled.is_empty());
+        assert!(
+            sampled.len() <= 8,
+            "sampling returned more than it was asked for"
+        );
+
+        for candidate in store.sample(true, 8) {
+            assert!(
+                candidate.expire_at.is_some(),
+                "a volatile sample returned {:?}, which has no expiry",
+                candidate.key
+            );
+        }
+
+        // An empty pool is not an error, it is an empty answer.
+        assert!(Store::new().sample(false, 5).is_empty());
+        assert!(store.sample(true, 0).is_empty());
+    }
+
+    #[test]
+    fn a_read_makes_a_key_look_newer_than_one_that_was_not_read() {
+        let mut store = Store::new();
+        store.set_string(b"cold", b"v");
+        store.set_string(b"hot", b"v");
+        for _ in 0..5 {
+            store.get_string(b"hot");
+        }
+
+        let sampled = store.sample(false, 32);
+        let hot = sampled
+            .iter()
+            .find(|c| c.key == b"hot")
+            .expect("hot sampled");
+        let cold = sampled
+            .iter()
+            .find(|c| c.key == b"cold")
+            .expect("cold sampled");
+        assert!(
+            hot.last_access > cold.last_access,
+            "reading a key did not move it up the LRU order"
+        );
+    }
+
+    #[test]
+    fn evict_removes_a_key_without_counting_a_lookup() {
+        let mut store = Store::new();
+        store.set_string(b"k", b"v");
+        let before = store.lookup_counts();
+
+        assert!(store.evict(b"k"));
+        assert!(
+            !store.evict(b"k"),
+            "evicting twice reports the second as a miss"
+        );
+        check_indexes(&store);
+        assert_eq!(store.lookup_counts(), before, "an eviction is not a lookup");
+        assert_eq!(store.size(), 0);
     }
 }

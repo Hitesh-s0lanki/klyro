@@ -68,6 +68,37 @@ scan-default-count 10
 # Most score/member pairs one ZADD may carry.
 zadd-max-pairs 128
 
+# ----- memory limit -------------------------------------------------
+
+# Bytes the process may hold before eviction starts. 0 means no limit,
+# and is the default. Accepts Redis's size suffixes: k/m/g are powers
+# of a thousand, kb/mb/gb powers of 1024.
+#
+# This is the whole process, not just the keyspace - client buffers and
+# the runtime are inside the number - so a limit below what the server
+# needs at rest can never be satisfied.
+maxmemory 0
+
+# What to drop once maxmemory is reached. One of:
+#
+#   noeviction        refuse the writes instead (the default)
+#   allkeys-lru       least recently used, from every key
+#   allkeys-lfu       least frequently used, from every key
+#   allkeys-random    any key
+#   volatile-lru      least recently used, among keys with a TTL
+#   volatile-lfu      least frequently used, among keys with a TTL
+#   volatile-random   any key with a TTL
+#   volatile-ttl      the key expiring soonest
+#
+# A volatile-* policy on a keyspace where nothing carries a TTL has no
+# eligible key, and so behaves exactly like noeviction.
+maxmemory-policy noeviction
+
+# Keys sampled per eviction round. Eviction is approximate on purpose:
+# 5 lands within a couple of percent of true LRU, and a higher number
+# buys accuracy at the cost of work per eviction.
+maxmemory-samples 5
+
 # ----- memory indexes -----------------------------------------------
 
 # Ceiling on a memory query's TOPK.

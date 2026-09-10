@@ -2,6 +2,9 @@
 
 **The high-performance in-memory data server.**
 
+[![CI](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml/badge.svg)](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An in-memory, Redis-style data server in Rust, with String, List, Hash,
 Set, and Sorted Set data types - plus **Memory**, a retrieval structure
 for AI agents that indexes text and embeddings together and ranks by
@@ -11,13 +14,17 @@ query. See [the memory commands](#memory-indexes) and
 
 **It speaks RESP, so any Redis client library works** - redis-py,
 go-redis, ioredis, and `redis-cli` all connect with no adapter. Values
-are binary-safe.
+are binary-safe. Transactions (`MULTI`/`EXEC`/`WATCH`), pub/sub, and
+the blocking pops (`BLPOP` and family) all work, so work queues,
+fan-out messaging, and optimistic locking do too.
 
 Started from https://github.com/rairai77/cache22 (a bare C skeleton,
 following https://www.youtube.com/watch?v=FFxEoQyNQKM), grown into a
 full C implementation, then migrated to Rust module-by-module (see
 [docs/rust-migration.md](docs/rust-migration.md)), then given the Redis
-wire protocol (see [docs/resp-protocol.md](docs/resp-protocol.md)).
+wire protocol (see [docs/resp-protocol.md](docs/resp-protocol.md)) and
+the connection-level features that depend on it (see
+[docs/connection-state.md](docs/connection-state.md)).
 
 ## Build
 
@@ -67,6 +74,23 @@ it on graceful shutdown (`SHUTDOWN` command, or `SIGINT`/`SIGTERM`), on
 an explicit `SAVE` command, and automatically every 60s if anything
 changed. Killing the process (`SIGKILL`, a crash, or power loss) loses
 any changes since the last save.
+
+## Install from npm
+
+No toolchain needed - npm downloads a prebuilt binary for your machine:
+
+```sh
+npx klyro-db                      # port 7171, dump file klyro.dump
+npx klyro-db 7200                 # a different port
+npx klyro-db klyro.conf           # a config file
+```
+
+`npm install -g klyro-db` leaves a `klyro` command on your PATH instead.
+It takes the same arguments as the binary, because it *is* the binary -
+the package is a launcher plus one platform's build, published from
+[npm/](npm/). Builds exist for macOS and Linux on x64 and arm64; the
+event loop is `poll(2)`, so there is no Windows build. See
+[docs/npm-package.md](docs/npm-package.md).
 
 ## Run with Docker
 
@@ -126,6 +150,23 @@ line in `KLYRO_CONFIG`. Arguments given to `docker run` after the image
 name bypass all three and go straight to the binary. See
 [docs/docker.md](docs/docker.md) for the decisions behind the image.
 
+## Website and docs
+
+The marketing site and the documentation live in [frontend/](frontend/), a
+Next.js app using Tailwind CSS and shadcn/ui:
+
+```sh
+cd frontend
+npm install
+npm run dev        # http://localhost:3000
+```
+
+The home page explains what Klyro is and who it is for; `/docs` carries the
+quickstart, the memory concepts, the full command reference, the
+configuration surface, and the client integration notes. See
+[frontend/README.md](frontend/README.md) for the folder structure and for
+which parts are still placeholders (the SDK package names, principally).
+
 ## Talk to it
 
 Any Redis client library works. There is no Klyro-specific client to
@@ -164,7 +205,7 @@ Node.js examples and the list of clients verified against Klyro.
 
 ## Commands
 
-122 commands: the 107 Redis-shaped ones, plus the 15 `MEM.*` commands
+145 commands: the 130 Redis-shaped ones, plus the 15 `MEM.*` commands
 that have no Redis equivalent. Reply types match Redis's, which is what
 lets stock client libraries decode them; the tables below name the type
 rather than the literal bytes.
@@ -247,8 +288,21 @@ only if nobody holds it, and the lease expires on its own.
 | `LTRIM key start stop` | `OK` (an empty range deletes the key) |
 | `RPOPLPUSH source destination` | the moved value, or nil |
 | `LMOVE source destination LEFT\|RIGHT LEFT\|RIGHT` | the moved value, or nil |
+| `LMPOP numkeys key [key ...] LEFT\|RIGHT [COUNT count]` | `[key, [values...]]` from the first non-empty key, else a null array |
+| `BLPOP key [key ...] timeout` / `BRPOP ...` | `[key, value]`, or a null array at the timeout |
+| `BLMOVE source destination LEFT\|RIGHT LEFT\|RIGHT timeout` | the moved value, or nil at the timeout |
+| `BRPOPLPUSH source destination timeout` | the moved value, or nil at the timeout |
+| `BLMPOP timeout numkeys key [key ...] LEFT\|RIGHT [COUNT count]` | as `LMPOP`, waiting for the first value |
 
 `RPOPLPUSH`/`LMOVE` may name the same list twice, which rotates it.
+
+The `B`-prefixed commands wait for a value instead of answering with
+nil. Keys are tried in the order given, so listing queues most-important
+first is a priority order; waiters on one key are served oldest first. A
+timeout of `0` waits forever, and a fractional one (`BLPOP q 0.5`) is
+honoured to the millisecond. Inside `MULTI` they never wait: nothing
+could feed a transaction while it holds the server, so they answer with
+their timeout reply straight away.
 
 ### Hashes
 
@@ -307,9 +361,61 @@ is empty deletes the destination.
 | `ZREMRANGEBYRANK key start stop` | number removed |
 | `ZREMRANGEBYSCORE key min max` | number removed |
 | `ZPOPMIN key [count]` / `ZPOPMAX key [count]` | the popped members with their scores |
+| `ZMPOP numkeys key [key ...] MIN\|MAX [COUNT count]` | `[key, [[member, score], ...]]`, else a null array |
+| `BZPOPMIN key [key ...] timeout` / `BZPOPMAX ...` | `[key, member, score]`, or a null array at the timeout |
+| `BZMPOP timeout numkeys key [key ...] MIN\|MAX [COUNT count]` | as `ZMPOP`, waiting for the first member |
 
 Score bounds accept a plain number, `-inf`/`+inf`, or a `(` prefix for
 an exclusive bound (`ZCOUNT board (75 +inf`).
+
+### Transactions
+
+| Command | Reply |
+|---|---|
+| `MULTI` | `OK` (later commands reply `QUEUED` instead of running) |
+| `EXEC` | array of every queued command's reply, or a null array if a watched key changed |
+| `DISCARD` | `OK` (the queue is thrown away) |
+| `WATCH key [key ...]` | `OK` |
+| `UNWATCH` | `OK` |
+| `RESET` | `RESET` (discards the queue, unwatches, leaves subscriber mode) |
+
+`WATCH` is optimistic locking: if any watched key is written between
+`WATCH` and `EXEC`, by anyone, the transaction runs nothing and `EXEC`
+replies with a null array. A transaction runs with nothing interleaved,
+but it does not roll back - a command that fails at run time leaves its
+error in the result array and the rest still run, as in Redis. An error
+that can be caught while queueing (an unknown command) aborts the whole
+transaction with `EXECABORT`.
+
+### Pub/sub
+
+| Command | Reply |
+|---|---|
+| `SUBSCRIBE channel [channel ...]` | one `subscribe` frame per channel, with a running subscription count |
+| `UNSUBSCRIBE [channel ...]` | one `unsubscribe` frame per channel (no arguments means all of them) |
+| `PSUBSCRIBE pattern [pattern ...]` / `PUNSUBSCRIBE [pattern ...]` | the same, as `psubscribe`/`punsubscribe` |
+| `PUBLISH channel message` | how many subscribers received it |
+| `PUBSUB CHANNELS [pattern]` | channels with at least one subscriber |
+| `PUBSUB NUMSUB [channel ...]` | map of channel to subscriber count |
+| `PUBSUB NUMPAT` | how many distinct patterns are subscribed to |
+
+Patterns use the same glob syntax as `KEYS`. A client subscribed to both
+a channel and a pattern matching it receives the message twice, once as
+`message` and once as `pmessage`, because it made two subscriptions.
+
+On a RESP2 connection, a client holding a subscription may only run the
+subscribe commands, `PING`, `RESET`, and `QUIT` - RESP2 has no marker
+separating a delivered message from a reply. `HELLO 3` lifts the
+restriction, because RESP3 marks pushes.
+
+### Connection
+
+| Command | Reply |
+|---|---|
+| `CLIENT ID` | this connection's id, the one `HELLO` reports |
+| `CLIENT GETNAME` / `CLIENT SETNAME name` | the name, or `OK` |
+| `CLIENT SETINFO LIB-NAME\|LIB-VER value` | `OK` (advisory, from the client library) |
+| `CLIENT INFO` | one `field=value` line describing this connection |
 
 ### Memory indexes
 
@@ -409,19 +515,27 @@ src/
   main.rs        - entry point: wires everything together
   resp.rs        - the RESP protocol: reply encoding, request parsing
   server.rs      - TCP networking + poll()-based event loop, RESP framing
+  client.rs      - per-connection state: MULTI queue, WATCH list, subscriptions
+  watch.rs       - the watched-key version counters behind WATCH/EXEC
+  pubsub.rs      - who is subscribed to what, and who a message goes to
   config.rs      - the tunables, the config-file parser, CONFIG's get/set surface
   stats.rs       - the counters INFO reports
   commands/      - command parsing and dispatch, grouped by data type
     mod.rs       -   the router plus reply helpers shared by the handlers
+    keyspec.rs   -   which keys each write command touches, and which deny OOM
     generic.rs   -   any-type keys: DEL/EXISTS/EXPIRE/RENAME/COPY/SCAN/...
     string.rs    -   SET (with its option flags), the SETNX family, INCR*
     list.rs      -   push/pop, LINDEX/LSET/LINSERT/LREM/LTRIM, LMOVE
     hash.rs      -   HSET/HMSET/HMGET/HINCRBY/HKEYS/...
     set.rs       -   membership plus the SINTER/SUNION/SDIFF algebra
     zset.rs      -   ranks, score-range queries, ZINCRBY, the pops
+    blocking.rs  -   BLPOP and family, plus LMPOP/ZMPOP
+    transactions.rs - MULTI/EXEC/DISCARD/WATCH/UNWATCH/RESET
+    pubsub.rs    -   SUBSCRIBE/PUBLISH/PUBSUB
     memory.rs    -   the MEM.* family: CRUD, SEARCH/VSEARCH/QUERY
-    server.rs    -   PING/ECHO/HELLO/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
+    server.rs    -   PING/ECHO/HELLO/CLIENT/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
   store.rs       - the keyspace: maps keys to typed values, with expiry
+  evict.rs       - maxmemory: the eviction policies and how a victim is picked
   persist.rs     - save/load the whole keyspace to a dump file
   app.rs         - bundles Store + Persist + the running flag shared by the above
   types/         - the data type implementations, all byte-oriented
@@ -439,8 +553,8 @@ src/
   util/          - generic infrastructure with no keyspace/protocol knowledge
     bytes.rs     -   the Bytes alias plus byte parsing/formatting helpers
     glob.rs      -   glob pattern matching (used by KEYS/SCAN)
-    rand.rs      -   xorshift PRNG (used by SPOP/SRANDMEMBER/RANDOMKEY)
-    memory.rs    -   counting global allocator (used by INFO memory)
+    rand.rs      -   xorshift PRNG (used by SPOP/SRANDMEMBER/RANDOMKEY, eviction)
+    memory.rs    -   counting global allocator (used by INFO memory, maxmemory)
 
 Dockerfile            - two-stage image build (static musl binary -> Alpine)
 docker-compose.yml    - one service, published port, named volume for /data
@@ -466,6 +580,16 @@ tests/           - the integration suite (see "Test" above)
   scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
   persistence.rs -  save/kill/reload round-trip, the version 1 dump format
   admin.rs       -  INFO sections and counters, CONFIG, HELLO negotiation
+
+npm/             - the npm packages (see docs/npm-package.md)
+  build.mjs      -  assembles them from a built binary into npm/dist/
+  klyro-db/      -  the wrapper users install: a README and the launcher
+
+frontend/        - the website: marketing home page + documentation
+  src/app/       -  routes; /docs holds one directory per docs page
+  src/components/-  layout, home sections, docs primitives, UI kit
+  src/content/   -  marketing copy and the docs sidebar tree
+  src/lib/       -  site constants, code highlighter, helpers
 ```
 
 Each concern lives in its own module so new features can be added as new
@@ -501,6 +625,34 @@ per-test isolation means `Drop` alone guarantees cleanup even when a
 test panics, with no shared state or key-namespacing needed between
 tests.
 
+## Memory limit and eviction
+
+Klyro grows without bound until you give it a ceiling:
+
+```sh
+redis-cli -p 7171 CONFIG SET maxmemory 512mb
+redis-cli -p 7171 CONFIG SET maxmemory-policy allkeys-lru
+```
+
+The eight policies are Redis's. The first half of the name says which
+keys are eligible - `allkeys-` any of them, `volatile-` only the ones
+carrying a TTL - and the second says which goes first: `-lru` the least
+recently used, `-lfu` the least frequently used, `-random` any of them,
+and `volatile-ttl` the one expiring soonest. The default is
+`noeviction`, which refuses writes rather than dropping data nobody said
+was expendable.
+
+At the limit, a command that could grow the keyspace is answered with
+`OOM command not allowed when used memory > 'maxmemory'.` Everything
+else still runs, `DEL` and `FLUSHALL` included, because refusing those
+would close the only way out of the state.
+
+`INFO memory` reports the limit and the policy, and `INFO stats` counts
+`evicted_keys` separately from `expired_keys` - an expiry is what the
+client asked for, an eviction is the server overruling it. See
+[docs/eviction.md](docs/eviction.md) for what is measured, how a victim
+is chosen, and what this does not do.
+
 ## Persistence format
 
 The dump file is length-prefixed, because a value may contain a newline:
@@ -523,19 +675,23 @@ upgrade. They are rewritten as version 3 on the next save. See
 See [docs/redis-feature-gap.md](docs/redis-feature-gap.md) for the full
 comparison against Redis. The ones worth knowing before you use this:
 
-- No transactions (`MULTI`/`EXEC`), pub/sub, scripting, or blocking
-  commands (`BLPOP`), so no queues and no server-side atomic
-  read-modify-write beyond what a single command does.
-- Only the 122 commands listed above. A client library will happily
+- No scripting (`EVAL`), so the only server-side atomic
+  read-modify-write is what a single command or a `WATCH`-guarded
+  transaction gives you.
+- Only the 145 commands listed above. A client library will happily
   call anything else and get back `ERR unknown command`.
+- No keyspace notifications (`notify-keyspace-events`), so pub/sub
+  carries only what clients publish to it.
 - Memory indexes do not embed text: the client supplies the vector.
   Vector search is an exact brute-force scan, capped by `mem-max-scan`
   because the server is single-threaded and an unbounded scan would
   stall every other client. Both are addressed in
   [docs/memory-structures.md](docs/memory-structures.md).
-- No `maxmemory` or eviction policy: the dataset grows until the process
-  runs out of memory. `INFO memory` reports how much is in use, but
-  nothing acts on it.
+- Eviction is approximate: a victim is the best of `maxmemory-samples`
+  randomly drawn keys, not the true least-recently-used one. `maxmemory`
+  measures the whole process rather than the keyspace, so a limit set
+  below what the server needs at rest can never be satisfied. See
+  [docs/eviction.md](docs/eviction.md).
 - No authentication, ACLs, or TLS; do not expose this on an untrusted
   network.
 - Sorted Set range/lookup ops are O(n) (a sorted array, not a skip list) —
@@ -543,7 +699,11 @@ comparison against Redis. The ones worth knowing before you use this:
 - Persistence is a full-keyspace snapshot (like Redis's RDB), not an
   append-only log — a `SIGKILL`/crash loses everything since the last
   save (on a normal exit, at most ~60s of changes).
-- RESP3 is negotiated but its push messages are unimplemented, because
-  there is no pub/sub or client-side caching to push.
+- RESP3 push messages carry pub/sub deliveries, but there is no
+  client-side caching (`CLIENT TRACKING`) to invalidate over them.
 - `SCAN`'s cursor is a position in a sorted snapshot of the keyspace, so
   each call costs O(n log n) rather than the O(1) a real `SCAN` gives.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

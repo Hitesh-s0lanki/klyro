@@ -210,6 +210,50 @@ impl KlyroClient {
         self.stream.write_all(raw).expect("write");
     }
 
+    /// Sends a command without reading its reply - for a blocking
+    /// command, whose answer only arrives once another client acts.
+    pub fn send_only(&mut self, args: &[&str]) {
+        let owned: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+        let mut request = Vec::new();
+        request.extend_from_slice(format!("*{}\r\n", owned.len()).as_bytes());
+        for arg in &owned {
+            request.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            request.extend_from_slice(arg);
+            request.extend_from_slice(b"\r\n");
+        }
+        self.stream.write_all(&request).expect("write");
+    }
+
+    /// Reads one frame that is already on its way: the answer to a
+    /// blocking command, or a pushed pub/sub message.
+    pub fn read(&mut self) -> Value {
+        self.read_value()
+    }
+
+    /// Whether nothing arrives within `within`. Used to assert that a
+    /// blocking command really is blocked, and that a message did not
+    /// reach a client it was not addressed to.
+    pub fn quiet_for(&mut self, within: Duration) -> bool {
+        if parse(&self.buffer).is_some() {
+            return false;
+        }
+        self.stream.set_read_timeout(Some(within)).unwrap();
+        let mut chunk = [0u8; 4096];
+        let quiet = match self.stream.read(&mut chunk) {
+            // A closed connection is not silence: something happened.
+            Ok(0) => false,
+            Ok(n) => {
+                self.buffer.extend_from_slice(&chunk[..n]);
+                false
+            }
+            Err(_) => true,
+        };
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        quiet
+    }
+
     /// Whether the server has closed this connection.
     pub fn closed(&mut self) -> bool {
         let mut chunk = [0u8; 64];
@@ -262,9 +306,10 @@ fn parse(buf: &[u8]) -> Option<(Value, usize)> {
                 after + len + 2,
             ))
         }
-        // RESP3 maps and sets arrive here too; both are read as a
-        // flat array of their elements, which is all these tests need.
-        b'*' | b'~' | b'%' => {
+        // RESP3 maps, sets, and pushes arrive here too; all three are
+        // read as a flat array of their elements, which is all these
+        // tests need.
+        b'*' | b'~' | b'%' | b'>' => {
             let mut count: i64 = text.trim().parse().ok()?;
             if count < 0 {
                 return Some((Value::NilArray, after));
