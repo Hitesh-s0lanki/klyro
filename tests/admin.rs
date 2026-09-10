@@ -421,3 +421,91 @@ fn hello_refuses_a_protocol_it_does_not_speak() {
     let mut client = server.connect();
     assert!(client.send("HELLO 4").error().starts_with("NOPROTO"));
 }
+
+#[test]
+fn client_id_is_unique_per_connection() {
+    let server = KlyroServer::new();
+    let (mut first, mut second) = (server.connect(), server.connect());
+    let one = first.send("CLIENT ID").integer();
+    let two = second.send("CLIENT ID").integer();
+    assert!(one > 0 && two > one);
+    // HELLO reports the same id, which is what a client caches.
+    let hello = first.send("HELLO").pairs();
+    assert!(hello.contains(&("id".to_string(), one.to_string())));
+}
+
+#[test]
+fn client_setname_and_getname_round_trip() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+
+    assert_eq!(client.send("CLIENT GETNAME"), Value::Nil);
+    assert_eq!(client.send("CLIENT SETNAME worker-3"), ok());
+    assert_eq!(client.send("CLIENT GETNAME"), bulk("worker-3"));
+    // A space would break CLIENT INFO's one-line-per-client format.
+    assert!(client.call(&["CLIENT", "SETNAME", "two words"]).is_error());
+}
+
+#[test]
+fn client_setinfo_is_accepted_from_client_libraries() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    assert_eq!(client.send("CLIENT SETINFO LIB-NAME redis-py"), ok());
+    assert_eq!(client.send("CLIENT SETINFO LIB-VER 5.0.1"), ok());
+}
+
+#[test]
+fn client_info_describes_this_connection() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("CLIENT SETNAME reporter");
+    client.send("WATCH k");
+
+    let line = client.send("CLIENT INFO").text();
+    assert!(line.contains("name=reporter"), "{line:?}");
+    assert!(line.contains("watch=1"), "{line:?}");
+    // -1 is "no transaction open", as Redis reports it.
+    assert!(line.contains("multi=-1"), "{line:?}");
+}
+
+#[test]
+fn info_reports_blocked_watching_and_subscribed_clients() {
+    let server = KlyroServer::new();
+    let (mut waiter, mut watcher) = (server.connect(), server.connect());
+    let mut listener = server.connect();
+    let mut client = server.connect();
+
+    waiter.send_only(&["BLPOP", "q", "0"]);
+    assert!(waiter.quiet_for(std::time::Duration::from_millis(150)));
+    watcher.send("WATCH k");
+    listener.call(&["SUBSCRIBE", "news"]);
+
+    let clients = client.send("INFO clients");
+    assert_eq!(field(&clients, "blocked_clients"), "1");
+    assert_eq!(field(&clients, "watching_clients"), "1");
+    assert_eq!(field(&clients, "pubsub_clients"), "1");
+
+    client.send("PUBLISH news hi");
+    let stats = client.send("INFO stats");
+    assert_eq!(field(&stats, "pubsub_channels"), "1");
+    assert_eq!(field(&stats, "total_messages_published"), "1");
+}
+
+#[test]
+fn info_counts_transactions_that_ran() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+
+    client.send("MULTI");
+    client.send("SET k v");
+    client.send("EXEC");
+    assert_eq!(field(&client.send("INFO stats"), "total_transactions"), "1");
+
+    // One a WATCH aborted is not a transaction that ran.
+    let mut other = server.connect();
+    client.send("WATCH k");
+    other.send("SET k changed");
+    client.send("MULTI");
+    client.send("EXEC");
+    assert_eq!(field(&client.send("INFO stats"), "total_transactions"), "1");
+}

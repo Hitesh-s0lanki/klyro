@@ -1,13 +1,16 @@
 mod app;
+mod client;
 mod commands;
 mod config;
 mod persist;
+mod pubsub;
 mod resp;
 mod server;
 mod stats;
 mod store;
 mod types;
 mod util;
+mod watch;
 
 use std::env;
 use std::process::ExitCode;

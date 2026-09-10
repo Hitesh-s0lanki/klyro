@@ -4,3 +4,6 @@
 
 # Rust build output
 /target
+
+# Scratch crates, not part of the server
+learning

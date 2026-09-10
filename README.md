@@ -11,13 +11,17 @@ query. See [the memory commands](#memory-indexes) and
 
 **It speaks RESP, so any Redis client library works** - redis-py,
 go-redis, ioredis, and `redis-cli` all connect with no adapter. Values
-are binary-safe.
+are binary-safe. Transactions (`MULTI`/`EXEC`/`WATCH`), pub/sub, and
+the blocking pops (`BLPOP` and family) all work, so work queues,
+fan-out messaging, and optimistic locking do too.
 
 Started from https://github.com/rairai77/cache22 (a bare C skeleton,
 following https://www.youtube.com/watch?v=FFxEoQyNQKM), grown into a
 full C implementation, then migrated to Rust module-by-module (see
 [docs/rust-migration.md](docs/rust-migration.md)), then given the Redis
-wire protocol (see [docs/resp-protocol.md](docs/resp-protocol.md)).
+wire protocol (see [docs/resp-protocol.md](docs/resp-protocol.md)) and
+the connection-level features that depend on it (see
+[docs/connection-state.md](docs/connection-state.md)).
 
 ## Build
 
@@ -126,6 +130,23 @@ line in `KLYRO_CONFIG`. Arguments given to `docker run` after the image
 name bypass all three and go straight to the binary. See
 [docs/docker.md](docs/docker.md) for the decisions behind the image.
 
+## Website and docs
+
+The marketing site and the documentation live in [frontend/](frontend/), a
+Next.js app using Tailwind CSS and shadcn/ui:
+
+```sh
+cd frontend
+npm install
+npm run dev        # http://localhost:3000
+```
+
+The home page explains what Klyro is and who it is for; `/docs` carries the
+quickstart, the memory concepts, the full command reference, the
+configuration surface, and the client integration notes. See
+[frontend/README.md](frontend/README.md) for the folder structure and for
+which parts are still placeholders (the SDK package names, principally).
+
 ## Talk to it
 
 Any Redis client library works. There is no Klyro-specific client to
@@ -164,7 +185,7 @@ Node.js examples and the list of clients verified against Klyro.
 
 ## Commands
 
-122 commands: the 107 Redis-shaped ones, plus the 15 `MEM.*` commands
+145 commands: the 130 Redis-shaped ones, plus the 15 `MEM.*` commands
 that have no Redis equivalent. Reply types match Redis's, which is what
 lets stock client libraries decode them; the tables below name the type
 rather than the literal bytes.
@@ -247,8 +268,21 @@ only if nobody holds it, and the lease expires on its own.
 | `LTRIM key start stop` | `OK` (an empty range deletes the key) |
 | `RPOPLPUSH source destination` | the moved value, or nil |
 | `LMOVE source destination LEFT\|RIGHT LEFT\|RIGHT` | the moved value, or nil |
+| `LMPOP numkeys key [key ...] LEFT\|RIGHT [COUNT count]` | `[key, [values...]]` from the first non-empty key, else a null array |
+| `BLPOP key [key ...] timeout` / `BRPOP ...` | `[key, value]`, or a null array at the timeout |
+| `BLMOVE source destination LEFT\|RIGHT LEFT\|RIGHT timeout` | the moved value, or nil at the timeout |
+| `BRPOPLPUSH source destination timeout` | the moved value, or nil at the timeout |
+| `BLMPOP timeout numkeys key [key ...] LEFT\|RIGHT [COUNT count]` | as `LMPOP`, waiting for the first value |
 
 `RPOPLPUSH`/`LMOVE` may name the same list twice, which rotates it.
+
+The `B`-prefixed commands wait for a value instead of answering with
+nil. Keys are tried in the order given, so listing queues most-important
+first is a priority order; waiters on one key are served oldest first. A
+timeout of `0` waits forever, and a fractional one (`BLPOP q 0.5`) is
+honoured to the millisecond. Inside `MULTI` they never wait: nothing
+could feed a transaction while it holds the server, so they answer with
+their timeout reply straight away.
 
 ### Hashes
 
@@ -307,9 +341,61 @@ is empty deletes the destination.
 | `ZREMRANGEBYRANK key start stop` | number removed |
 | `ZREMRANGEBYSCORE key min max` | number removed |
 | `ZPOPMIN key [count]` / `ZPOPMAX key [count]` | the popped members with their scores |
+| `ZMPOP numkeys key [key ...] MIN\|MAX [COUNT count]` | `[key, [[member, score], ...]]`, else a null array |
+| `BZPOPMIN key [key ...] timeout` / `BZPOPMAX ...` | `[key, member, score]`, or a null array at the timeout |
+| `BZMPOP timeout numkeys key [key ...] MIN\|MAX [COUNT count]` | as `ZMPOP`, waiting for the first member |
 
 Score bounds accept a plain number, `-inf`/`+inf`, or a `(` prefix for
 an exclusive bound (`ZCOUNT board (75 +inf`).
+
+### Transactions
+
+| Command | Reply |
+|---|---|
+| `MULTI` | `OK` (later commands reply `QUEUED` instead of running) |
+| `EXEC` | array of every queued command's reply, or a null array if a watched key changed |
+| `DISCARD` | `OK` (the queue is thrown away) |
+| `WATCH key [key ...]` | `OK` |
+| `UNWATCH` | `OK` |
+| `RESET` | `RESET` (discards the queue, unwatches, leaves subscriber mode) |
+
+`WATCH` is optimistic locking: if any watched key is written between
+`WATCH` and `EXEC`, by anyone, the transaction runs nothing and `EXEC`
+replies with a null array. A transaction runs with nothing interleaved,
+but it does not roll back - a command that fails at run time leaves its
+error in the result array and the rest still run, as in Redis. An error
+that can be caught while queueing (an unknown command) aborts the whole
+transaction with `EXECABORT`.
+
+### Pub/sub
+
+| Command | Reply |
+|---|---|
+| `SUBSCRIBE channel [channel ...]` | one `subscribe` frame per channel, with a running subscription count |
+| `UNSUBSCRIBE [channel ...]` | one `unsubscribe` frame per channel (no arguments means all of them) |
+| `PSUBSCRIBE pattern [pattern ...]` / `PUNSUBSCRIBE [pattern ...]` | the same, as `psubscribe`/`punsubscribe` |
+| `PUBLISH channel message` | how many subscribers received it |
+| `PUBSUB CHANNELS [pattern]` | channels with at least one subscriber |
+| `PUBSUB NUMSUB [channel ...]` | map of channel to subscriber count |
+| `PUBSUB NUMPAT` | how many distinct patterns are subscribed to |
+
+Patterns use the same glob syntax as `KEYS`. A client subscribed to both
+a channel and a pattern matching it receives the message twice, once as
+`message` and once as `pmessage`, because it made two subscriptions.
+
+On a RESP2 connection, a client holding a subscription may only run the
+subscribe commands, `PING`, `RESET`, and `QUIT` - RESP2 has no marker
+separating a delivered message from a reply. `HELLO 3` lifts the
+restriction, because RESP3 marks pushes.
+
+### Connection
+
+| Command | Reply |
+|---|---|
+| `CLIENT ID` | this connection's id, the one `HELLO` reports |
+| `CLIENT GETNAME` / `CLIENT SETNAME name` | the name, or `OK` |
+| `CLIENT SETINFO LIB-NAME\|LIB-VER value` | `OK` (advisory, from the client library) |
+| `CLIENT INFO` | one `field=value` line describing this connection |
 
 ### Memory indexes
 
@@ -409,18 +495,25 @@ src/
   main.rs        - entry point: wires everything together
   resp.rs        - the RESP protocol: reply encoding, request parsing
   server.rs      - TCP networking + poll()-based event loop, RESP framing
+  client.rs      - per-connection state: MULTI queue, WATCH list, subscriptions
+  watch.rs       - the watched-key version counters behind WATCH/EXEC
+  pubsub.rs      - who is subscribed to what, and who a message goes to
   config.rs      - the tunables, the config-file parser, CONFIG's get/set surface
   stats.rs       - the counters INFO reports
   commands/      - command parsing and dispatch, grouped by data type
     mod.rs       -   the router plus reply helpers shared by the handlers
+    keyspec.rs   -   which keys each write command touches, for WATCH and BLPOP
     generic.rs   -   any-type keys: DEL/EXISTS/EXPIRE/RENAME/COPY/SCAN/...
     string.rs    -   SET (with its option flags), the SETNX family, INCR*
     list.rs      -   push/pop, LINDEX/LSET/LINSERT/LREM/LTRIM, LMOVE
     hash.rs      -   HSET/HMSET/HMGET/HINCRBY/HKEYS/...
     set.rs       -   membership plus the SINTER/SUNION/SDIFF algebra
     zset.rs      -   ranks, score-range queries, ZINCRBY, the pops
+    blocking.rs  -   BLPOP and family, plus LMPOP/ZMPOP
+    transactions.rs - MULTI/EXEC/DISCARD/WATCH/UNWATCH/RESET
+    pubsub.rs    -   SUBSCRIBE/PUBLISH/PUBSUB
     memory.rs    -   the MEM.* family: CRUD, SEARCH/VSEARCH/QUERY
-    server.rs    -   PING/ECHO/HELLO/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
+    server.rs    -   PING/ECHO/HELLO/CLIENT/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
   store.rs       - the keyspace: maps keys to typed values, with expiry
   persist.rs     - save/load the whole keyspace to a dump file
   app.rs         - bundles Store + Persist + the running flag shared by the above
@@ -466,6 +559,12 @@ tests/           - the integration suite (see "Test" above)
   scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
   persistence.rs -  save/kill/reload round-trip, the version 1 dump format
   admin.rs       -  INFO sections and counters, CONFIG, HELLO negotiation
+
+frontend/        - the website: marketing home page + documentation
+  src/app/       -  routes; /docs holds one directory per docs page
+  src/components/-  layout, home sections, docs primitives, UI kit
+  src/content/   -  marketing copy and the docs sidebar tree
+  src/lib/       -  site constants, code highlighter, helpers
 ```
 
 Each concern lives in its own module so new features can be added as new
@@ -523,11 +622,13 @@ upgrade. They are rewritten as version 3 on the next save. See
 See [docs/redis-feature-gap.md](docs/redis-feature-gap.md) for the full
 comparison against Redis. The ones worth knowing before you use this:
 
-- No transactions (`MULTI`/`EXEC`), pub/sub, scripting, or blocking
-  commands (`BLPOP`), so no queues and no server-side atomic
-  read-modify-write beyond what a single command does.
-- Only the 122 commands listed above. A client library will happily
+- No scripting (`EVAL`), so the only server-side atomic
+  read-modify-write is what a single command or a `WATCH`-guarded
+  transaction gives you.
+- Only the 145 commands listed above. A client library will happily
   call anything else and get back `ERR unknown command`.
+- No keyspace notifications (`notify-keyspace-events`), so pub/sub
+  carries only what clients publish to it.
 - Memory indexes do not embed text: the client supplies the vector.
   Vector search is an exact brute-force scan, capped by `mem-max-scan`
   because the server is single-threaded and an unbounded scan would
@@ -543,7 +644,7 @@ comparison against Redis. The ones worth knowing before you use this:
 - Persistence is a full-keyspace snapshot (like Redis's RDB), not an
   append-only log — a `SIGKILL`/crash loses everything since the last
   save (on a normal exit, at most ~60s of changes).
-- RESP3 is negotiated but its push messages are unimplemented, because
-  there is no pub/sub or client-side caching to push.
+- RESP3 push messages carry pub/sub deliveries, but there is no
+  client-side caching (`CLIENT TRACKING`) to invalidate over them.
 - `SCAN`'s cursor is a position in a sorted snapshot of the keyspace, so
   each call costs O(n log n) rather than the O(1) a real `SCAN` gives.

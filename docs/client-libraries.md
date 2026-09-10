@@ -88,13 +88,23 @@ SET greeting "hello there"
 
 ## What clients cannot do yet
 
-Every client library exposes far more of the Redis API than Klyro
+Every client library exposes more of the Redis API than Klyro
 implements. Calling something unimplemented returns
 `ERR unknown command`, which surfaces as an exception or error in the
-client. The notable absences are transactions (`MULTI`/`EXEC`),
-pub/sub, scripting (`EVAL`), the blocking commands (`BLPOP`), and the
-Stream, Bitmap, HyperLogLog, and Geo types. See
+client. The notable absences are scripting (`EVAL`), keyspace
+notifications, and the Stream, Bitmap, HyperLogLog, and Geo types. See
 [redis-feature-gap.md](redis-feature-gap.md) for the full list.
+
+A client's transaction, pipeline, pub/sub, and blocking-pop helpers all
+work: `r.pipeline(transaction=True)` in redis-py, `TxPipeline` in
+go-redis, `multi()` in ioredis, and each library's `pubsub()` /
+`Subscribe()` / `subscribe()` object. Verified with redis-py 8.1 over
+both protocol versions, including `WatchError` on an aborted
+transaction, `pmessage` delivery to a pattern subscriber, and a
+`blpop` that waits for another connection's push. A pub/sub connection in a client
+that defaults to RESP2 is restricted to the subscribe commands while it
+holds a subscription, as it would be against Redis; the libraries
+already know this and open a second connection for ordinary commands.
 
 Klyro also has no authentication, so leave the `password` option unset,
 and do not expose the port on an untrusted network.

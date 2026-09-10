@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use super::{exact_args, min_args, Checked, Response};
 use crate::app::App;
+use crate::client::Client;
 use crate::config::{SetError, PARAMETERS};
 use crate::resp::{Protocol, Reply};
 use crate::util::bytes::{eq_ignore_case, to_display, to_upper, Bytes};
@@ -23,9 +24,9 @@ const SECTIONS: &[&str] = &[
     "memorydb",
 ];
 
-pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
+pub fn dispatch(app: &mut App, client: &mut Client, name: &str, argv: &[Bytes]) -> Response {
     let close = matches!(name, "QUIT" | "SHUTDOWN");
-    let reply = match handle(app, name, argv) {
+    let reply = match handle(app, client, name, argv) {
         Ok(reply) | Err(reply) => reply,
     };
     // A successful HELLO is the one command that changes how later
@@ -35,9 +36,10 @@ pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
         _ => None,
     };
     Response {
-        reply,
+        replies: vec![reply],
         close,
         protocol,
+        block: None,
     }
 }
 
@@ -48,7 +50,7 @@ fn negotiated_protocol(argv: &[Bytes]) -> Protocol {
         .unwrap_or(Protocol::Resp2)
 }
 
-fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
+fn handle(app: &mut App, client: &mut Client, name: &str, argv: &[Bytes]) -> Checked<Reply> {
     match name {
         "PING" => match argv.len() {
             1 => Ok(Reply::Simple("PONG")),
@@ -61,7 +63,9 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             Ok(Reply::bulk(argv[1].clone()))
         }
 
-        "HELLO" => hello(argv),
+        "HELLO" => hello(client, argv),
+
+        "CLIENT" => client_command(client, argv),
 
         // Clients probe COMMAND on connect to learn the command table.
         // An empty array means "no introspection available", which they
@@ -91,11 +95,10 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
     }
 }
 
-/// `HELLO [protover]` - the handshake modern clients open with.
-///
-/// Klyro speaks RESP2 only, so a request for RESP3 is refused with
-/// NOPROTO, which is the reply clients are built to downgrade on.
-fn hello(argv: &[Bytes]) -> Checked<Reply> {
+/// `HELLO [protover]` - the handshake modern clients open with. A
+/// version Klyro does not speak is refused with NOPROTO, which is the
+/// reply clients are built to downgrade on.
+fn hello(client: &Client, argv: &[Bytes]) -> Checked<Reply> {
     let protocol = match argv.get(1) {
         None => Protocol::Resp2,
         Some(version) => {
@@ -109,11 +112,79 @@ fn hello(argv: &[Bytes]) -> Checked<Reply> {
         (Reply::bulk("server"), Reply::bulk("klyro")),
         (Reply::bulk("version"), Reply::bulk(crate::KLYRO_VERSION)),
         (Reply::bulk("proto"), Reply::Integer(protocol.version())),
-        (Reply::bulk("id"), Reply::Integer(0)),
+        (Reply::bulk("id"), Reply::Integer(client.id as i64)),
         (Reply::bulk("mode"), Reply::bulk("standalone")),
         (Reply::bulk("role"), Reply::bulk("master")),
         (Reply::bulk("modules"), Reply::Array(Vec::new())),
     ]))
+}
+
+/// `CLIENT` - the subset that describes *this* connection.
+///
+/// Klyro's connections live in the event loop, not in a registry the
+/// command layer can walk, so the subcommands that report on or reach
+/// into other connections (LIST, KILL) are not here. SETINFO is: every
+/// modern client library announces its name and version with it on
+/// connect, and an error there would be the first thing a caller sees.
+fn client_command(client: &mut Client, argv: &[Bytes]) -> Checked<Reply> {
+    min_args(argv, "CLIENT", 1)?;
+    match to_upper(&argv[1]).as_str() {
+        "ID" => Ok(Reply::Integer(client.id as i64)),
+
+        "GETNAME" => Ok(if client.name.is_empty() {
+            Reply::Nil
+        } else {
+            Reply::bulk(client.name.clone())
+        }),
+
+        "SETNAME" => {
+            exact_args(argv, "CLIENT|SETNAME", 2)?;
+            // A name with a space or a newline in it would break the
+            // one-client-per-line format CLIENT LIST is defined in.
+            if argv[2].iter().any(|b| b.is_ascii_whitespace()) {
+                return Ok(Reply::error(
+                    "ERR Client names cannot contain spaces, newlines or special characters.",
+                ));
+            }
+            client.name = argv[2].clone();
+            Ok(Reply::ok())
+        }
+
+        // Advisory metadata from the client library. Accepted and
+        // ignored, which is all a client needs it to be.
+        "SETINFO" => {
+            exact_args(argv, "CLIENT|SETINFO", 3)?;
+            Ok(Reply::ok())
+        }
+
+        "INFO" => Ok(Reply::bulk(client_line(client))),
+
+        other => Ok(Reply::error(format!(
+            "ERR Unknown CLIENT subcommand or wrong number of arguments for '{}'",
+            other
+        ))),
+    }
+}
+
+/// One connection described in the `field=value` format Redis uses.
+fn client_line(client: &Client) -> String {
+    format!(
+        "id={} addr={} name={} age={} resp={} db=0 sub={} psub={} multi={} watch={} cmd=client|info",
+        client.id,
+        client.addr,
+        to_display(&client.name),
+        client.created.elapsed().as_secs(),
+        client.protocol.version(),
+        client.channels.len(),
+        client.patterns.len(),
+        // -1 rather than 0 for "no transaction open", as Redis reports
+        // it: 0 is a MULTI that has queued nothing yet.
+        client
+            .transaction
+            .as_ref()
+            .map_or(-1, |t| t.queued.len() as i64),
+        client.watched.len(),
+    )
 }
 
 fn unix_seconds(time: std::time::SystemTime) -> u64 {
@@ -177,6 +248,9 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("connected_clients", app.stats.connected_clients);
             line!("maxclients", app.config.maxclients);
             line!("rejected_connections", app.stats.rejected_connections);
+            line!("blocked_clients", app.blocked.len());
+            line!("watching_clients", app.watch.tracked());
+            line!("pubsub_clients", app.pubsub.subscription_count());
         }
 
         "memory" => {
@@ -210,6 +284,10 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("keyspace_hits", app.stats.keyspace_hits);
             line!("keyspace_misses", app.stats.keyspace_misses);
             line!("expired_keys", app.store.expired_count());
+            line!("pubsub_channels", app.pubsub.active_channels(None).len());
+            line!("pubsub_patterns", app.pubsub.pattern_count());
+            line!("total_messages_published", app.stats.messages_published);
+            line!("total_transactions", app.stats.transactions);
         }
 
         // Named apart from "memory", which reports the allocator's view
