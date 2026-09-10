@@ -86,7 +86,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, key, StoreType::List)?;
 
             let mut popped = Vec::new();
-            if let Some(l) = app.store.get_existing_list(key) {
+            if let Some(l) = app.store.write_list(key) {
                 for _ in 0..count.unwrap_or(1) {
                     match pop_from(l, end) {
                         Some(v) => popped.push(v),
@@ -108,7 +108,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "LLEN" => {
             exact_args(argv, name, 1)?;
             check_type(app, &argv[1], StoreType::List)?;
-            let len = app.store.get_existing_list(&argv[1]).map_or(0, |l| l.len());
+            let len = app.store.read_list(&argv[1]).map_or(0, |l| l.len());
             Ok(Reply::Integer(len as i64))
         }
 
@@ -118,7 +118,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::List)?;
             let values: Vec<Bytes> = app
                 .store
-                .get_existing_list(&argv[1])
+                .read_list(&argv[1])
                 .map(|l| {
                     list::range(l, start, stop)
                         .into_iter()
@@ -135,7 +135,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::List)?;
             let value = app
                 .store
-                .get_existing_list(&argv[1])
+                .read_list(&argv[1])
                 .and_then(|l| list::resolve_index(l.len(), index).and_then(|i| l.get(i).cloned()));
             Ok(value.map_or(Reply::Nil, Reply::Bulk))
         }
@@ -144,7 +144,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             exact_args(argv, name, 3)?;
             let index = parse_int(&argv[2])?;
             check_type(app, &argv[1], StoreType::List)?;
-            let Some(l) = app.store.get_existing_list(&argv[1]) else {
+            let Some(l) = app.store.write_list(&argv[1]) else {
                 return Ok(Reply::error("ERR no such key"));
             };
             match list::resolve_index(l.len(), index) {
@@ -168,7 +168,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::List)?;
             let new_len = app
                 .store
-                .get_existing_list(&argv[1])
+                .write_list(&argv[1])
                 .and_then(|l| list::insert(l, before, &argv[3], &argv[4]));
             // -1 means the pivot is absent; 0 means the key is.
             Ok(Reply::Integer(match new_len {
@@ -184,7 +184,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::List)?;
             let removed = app
                 .store
-                .get_existing_list(&argv[1])
+                .write_list(&argv[1])
                 .map_or(0, |l| list::remove(l, count, &argv[3]));
             app.store.delete_if_empty(&argv[1]);
             Ok(Reply::Integer(removed as i64))
@@ -194,7 +194,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             exact_args(argv, name, 3)?;
             let (start, stop) = (parse_int(&argv[2])?, parse_int(&argv[3])?);
             check_type(app, &argv[1], StoreType::List)?;
-            if let Some(l) = app.store.get_existing_list(&argv[1]) {
+            if let Some(l) = app.store.write_list(&argv[1]) {
                 list::trim(l, start, stop);
             }
             app.store.delete_if_empty(&argv[1]);
@@ -216,11 +216,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, source, StoreType::List)?;
             check_type(app, destination, StoreType::List)?;
 
-            let Some(value) = app
-                .store
-                .get_existing_list(source)
-                .and_then(|l| pop_from(l, from))
-            else {
+            let Some(value) = app.store.write_list(source).and_then(|l| pop_from(l, from)) else {
                 return Ok(Reply::Nil);
             };
             // Rotating a list onto itself is legal, so push before the

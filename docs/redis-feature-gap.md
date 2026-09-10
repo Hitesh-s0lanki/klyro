@@ -6,9 +6,9 @@ same ground at the architecture level. This document is the detailed
 inventory: what exists, what is missing, and which gaps actually block
 real workloads.
 
-**Status, 2026-09-10:** Tiers 1, 2, and the protocol rewrite at the top
-of Tier 3 are built. Klyro speaks RESP, so stock Redis clients work, and
-implements **107 commands**, up from 39. Redis implements roughly
+**Status, 2026-09-10:** Tiers 1 and 2 are built, and Tier 3 is under
+way: the protocol rewrite and transactions are done. Klyro speaks RESP, so stock Redis clients work, and
+implements **117 commands**, up from 39. Redis implements roughly
 **240**. The gap that remains is not mainly in count: the load-bearing
 pieces left are protocol- and subsystem-shaped, not command-shaped.
 Sections below are marked **Done** where they have been closed. See
@@ -57,10 +57,23 @@ Everything that hung off this is fixed with it:
 Still missing: RESP3 push messages (nothing to push without pub/sub),
 and `RESET`/`CLIENT`.
 
-### 1.3 No transactions
+### 1.3 No transactions — **Done**
 
-`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` are all absent. There is
-no way to group commands atomically and no optimistic-locking primitive.
+`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` and `RESET` are in, with
+Redis's semantics: queued commands run back to back on the single
+event-loop thread, a run-time error inside `EXEC` is reported per
+command rather than rolling anything back, and `WATCH` gives optimistic
+locking that aborts `EXEC` if a watched key moved. See
+[transactions.md](transactions.md).
+
+One deviation: arity is not checked at queue time, only at `EXEC`. Redis
+catches it earlier. Unknown commands *are* caught at queue time and
+abort the transaction with `EXECABORT`.
+
+Building this uncovered a durability bug: mutations that left a
+collection non-empty never marked the store dirty, so the autosave could
+skip them. Fixed by splitting the collection accessors into read and
+write halves - see the same document.
 
 ### 1.4 No scripting or functions
 
@@ -260,6 +273,10 @@ Places where a command exists but behaves differently from Redis:
    closes the connection with an error instead.
 2. ~~`DBSIZE` counts expired-but-unswept keys.~~ **Fixed.** `Store::size`
    filters on liveness, so `DBSIZE` agrees with `KEYS`.
+2b. ~~Collection edits did not mark the store dirty.~~ **Fixed**, and it
+   was the worst bug found so far: `LPOP`, `HDEL`, `SREM`, `ZREM`,
+   `LSET` and `LTRIM` could be lost on a crash because the autosave
+   never saw them. See [transactions.md](transactions.md).
 3. ~~`SET`'s option flags are matched as a trailing suffix.~~ **Fixed**
    by the RESP rewrite; they parse at fixed positions now.
 4. ~~`SETRANGE` pads with spaces.~~ **Fixed.** It pads with NUL bytes,
@@ -300,24 +317,26 @@ All eight items are built; see [command-expansion.md](command-expansion.md).
     **Done**, with RESP3 as well. See
     [resp-protocol.md](resp-protocol.md). Stock clients work, values are
     binary-safe, and the silent truncation is gone.
-12. **`MULTI`/`EXEC`/`WATCH`.** Now the top of the list. The command
-    layer already returns a `Reply` value rather than writing to a
-    socket, which is most of what queuing a transaction needs; what is
-    missing is per-connection state and a watched-key registry.
-13. **Pub/sub, then blocking commands** (`BLPOP` and friends). Both need
-    the event loop to be able to park a connection and wake it, which is
-    the one piece of machinery RESP did not bring with it. RESP3's push
-    type is already specified in `resp.rs`'s design, though unimplemented.
+12. ~~`MULTI`/`EXEC`/`WATCH`.~~ **Done** — see
+    [transactions.md](transactions.md). Per-connection state now lives
+    in `session.rs`, and the watched-key registry in `store.rs`.
+13. **Pub/sub, then blocking commands** (`BLPOP` and friends). Now the
+    top of the list. Both need the event loop to be able to park a
+    connection and wake it, which is the one piece of machinery neither
+    RESP nor transactions brought with them. RESP3's push type is
+    already specified in `resp.rs`'s design, though unimplemented.
+14. **Scripting (`EVAL`).** The other way Redis makes several
+    operations atomic, and the one transactions do not cover.
 
 **Tier 4 — separable large efforts**
 
-14. `maxmemory` + LRU/LFU eviction. Required for cache use, and the
+15. `maxmemory` + LRU/LFU eviction. Required for cache use, and the
     measurement half is already done: `INFO memory` reports real usage
     from the counting allocator.
-15. AOF with `appendfsync`, plus forked `BGSAVE`.
-16. Replication (`REPLICAOF`, `PSYNC`), then Sentinel, then Cluster.
-17. `AUTH`/ACL, then TLS.
-18. Streams; skip-list sorted set; `epoll`/`kqueue`; bitmaps and HLL.
+16. AOF with `appendfsync`, plus forked `BGSAVE`.
+17. Replication (`REPLICAOF`, `PSYNC`), then Sentinel, then Cluster.
+18. `AUTH`/ACL, then TLS.
+19. Streams; skip-list sorted set; `epoll`/`kqueue`; bitmaps and HLL.
 
 **Cheap cleanups worth doing along the way:** `SCAN`'s cursor still
 sorts the whole keyspace per call (item in section 5), and the expired-key

@@ -155,6 +155,107 @@ fn a_version_1_dump_still_loads() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Reads INFO's unsaved-change counter.
+fn changes(client: &mut common::KlyroClient) -> i64 {
+    client
+        .send("INFO persistence")
+        .text()
+        .lines()
+        .find_map(|line| {
+            line.trim_end()
+                .strip_prefix("changes_since_last_save:")
+                .and_then(|n| n.parse().ok())
+        })
+        .expect("a changes_since_last_save line")
+}
+
+#[test]
+fn editing_a_collection_marks_the_store_unsaved() {
+    // Regression: mutations that left a collection non-empty used to
+    // slip past the dirty counter entirely, so the periodic autosave
+    // skipped them and the writes were lost on a crash.
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("RPUSH l a b c");
+    client.send("HSET h f1 v f2 v");
+    client.send("SADD s m1 m2");
+    client.send("ZADD z 1 m1 2 m2");
+    client.send("SAVE");
+    assert_eq!(changes(&mut client), 0);
+
+    for command in [
+        "LPOP l",
+        "LSET l 0 changed",
+        "HDEL h f1",
+        "SREM s m1",
+        "ZREM z m1",
+    ] {
+        let before = changes(&mut client);
+        client.send(command);
+        assert!(
+            changes(&mut client) > before,
+            "{command} did not mark the store unsaved"
+        );
+    }
+    server.cleanup_dump();
+}
+
+#[test]
+fn reading_a_collection_does_not_mark_the_store_unsaved() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("RPUSH l a b c");
+    client.send("HSET h f v");
+    client.send("SADD s m");
+    client.send("ZADD z 1 m");
+    client.send("SAVE");
+
+    for command in [
+        "LRANGE l 0 -1",
+        "LINDEX l 0",
+        "LLEN l",
+        "HGETALL h",
+        "HGET h f",
+        "SMEMBERS s",
+        "SISMEMBER s m",
+        "ZRANGE z 0 -1",
+        "ZSCORE z m",
+        "GET nothing",
+    ] {
+        client.send(command);
+        assert_eq!(
+            changes(&mut client),
+            0,
+            "{command} marked the store unsaved"
+        );
+    }
+    server.cleanup_dump();
+}
+
+#[test]
+fn a_collection_edit_survives_a_restart() {
+    let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        client.send("RPUSH l a b c");
+        client.send("HSET h keep v drop v");
+        client.send("SAVE");
+        // These used to be invisible to the next save.
+        client.send("LPOP l");
+        client.send("HDEL h drop");
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(client.send("LRANGE l 0 -1").list(), vec!["b", "c"]);
+        assert_eq!(client.send("HKEYS h").list(), vec!["keep"]);
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
 #[test]
 fn a_file_that_is_not_a_dump_is_ignored() {
     let path = std::env::temp_dir().join(format!("klyro_junk_{}.dump", std::process::id()));

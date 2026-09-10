@@ -89,7 +89,7 @@ easy to get subtly wrong. A client decides how to decode a reply from
 the command it sent, so `LLEN` must be an integer and not a bulk string,
 `GET` on a missing key must be null and not an empty bulk, and `LPOP key
 count` on a missing key must be a *null* array rather than an empty one.
-All 107 commands were gone through against Redis's documented reply
+All 111 commands were gone through against Redis's documented reply
 type, and the redis-py, go-redis, and ioredis sweeps check the ones that
 matter in practice.
 
@@ -129,7 +129,11 @@ pretend otherwise:
 
 ## What is still missing
 
-RESP3's push messages are unimplemented, because Klyro has no pub/sub
-or client-side caching to push. `RESET` and `CLIENT` are absent. The
-event loop still parks nothing, so the blocking commands cannot be built
-until it can - see the gap analysis.
+RESP3's push messages are unimplemented, because Klyro has no pub/sub or
+client-side caching to push. `CLIENT` is absent. The event loop still
+parks nothing, so the blocking commands cannot be built until it can -
+see the gap analysis.
+
+`RESET` arrived with [transactions](transactions.md), which also added
+the per-connection state that this rewrite's `Reply`-returning handlers
+made straightforward.

@@ -4,6 +4,7 @@ mod config;
 mod persist;
 mod resp;
 mod server;
+mod session;
 mod stats;
 mod store;
 mod types;

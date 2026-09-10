@@ -12,10 +12,12 @@ mod list;
 mod server;
 mod set;
 mod string;
+mod transaction;
 mod zset;
 
 use crate::app::App;
 use crate::resp::{Protocol, Reply};
+use crate::session::Session;
 use crate::store::StoreType;
 use crate::util::bytes::{to_display, to_upper, Bytes};
 
@@ -137,26 +139,204 @@ const READ_COMMANDS: &[&str] = &[
     "ZREVRANK",
 ];
 
-/// Executes one already-parsed command.
-pub fn dispatch(app: &mut App, argv: &[Bytes]) -> Option<Response> {
+/// Executes one already-parsed command, or queues it if the session has
+/// an open transaction.
+pub fn dispatch(app: &mut App, session: &mut Session, argv: &[Bytes]) -> Option<Response> {
     if argv.is_empty() {
         return None; // an empty inline line or `*0` array
     }
     let name = to_upper(&argv[0]);
 
+    if session.in_transaction() && !transaction::runs_during_multi(&name) {
+        app.stats.total_commands += 1;
+        return Some(Response::new(queue(session, &name, argv)));
+    }
+    Some(execute(app, session, argv))
+}
+
+/// Adds a command to the open transaction, or breaks the transaction if
+/// it could never run. Redis reports the problem here *and* refuses the
+/// later EXEC, so a client cannot miss it.
+fn queue(session: &mut Session, name: &str, argv: &[Bytes]) -> Reply {
+    if !is_known_command(name) {
+        session.mark_broken();
+        return unknown_command(argv);
+    }
+    session.queue(argv);
+    Reply::Simple("QUEUED")
+}
+
+/// Runs one command for real. Shared by normal dispatch and by EXEC, so
+/// a queued command is counted and accounted exactly like a direct one.
+pub(crate) fn execute(app: &mut App, session: &mut Session, argv: &[Bytes]) -> Response {
+    let name = to_upper(&argv[0]);
+
     app.stats.total_commands += 1;
     let before = app.store.lookup_counts();
 
-    let response = run(app, &name, argv);
+    let response = match name.as_str() {
+        "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH" | "RESET" => {
+            transaction::dispatch(app, session, &name, argv)
+        }
+        _ => run(app, &name, argv),
+    };
 
     // Attributing the delta, rather than counting inside each handler,
-    // keeps the accounting in one place instead of across 108 commands.
+    // keeps the accounting in one place instead of across 117 commands.
     if READ_COMMANDS.contains(&name.as_str()) {
         let after = app.store.lookup_counts();
         app.stats.keyspace_hits += after.0 - before.0;
         app.stats.keyspace_misses += after.1 - before.1;
     }
-    Some(response)
+    response
+}
+
+fn unknown_command(argv: &[Bytes]) -> Reply {
+    Reply::error(format!(
+        "ERR unknown command '{}', with args beginning with: {}",
+        to_display(&argv[0]),
+        argv[1..]
+            .iter()
+            .take(3)
+            .map(|a| format!("'{}'", to_display(a)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// Every command name the router knows. Used to reject a command at
+/// queue time, and checked against the router by a test so the two
+/// cannot drift apart.
+pub(crate) const COMMANDS: &[&str] = &[
+    // connection and server
+    "PING",
+    "ECHO",
+    "HELLO",
+    "INFO",
+    "CONFIG",
+    "SAVE",
+    "QUIT",
+    "SHUTDOWN",
+    "COMMAND",
+    // transactions
+    "MULTI",
+    "EXEC",
+    "DISCARD",
+    "WATCH",
+    "UNWATCH",
+    "RESET",
+    // generic
+    "DEL",
+    "UNLINK",
+    "EXISTS",
+    "EXPIRE",
+    "PEXPIRE",
+    "EXPIREAT",
+    "PEXPIREAT",
+    "PERSIST",
+    "TTL",
+    "PTTL",
+    "TYPE",
+    "KEYS",
+    "SCAN",
+    "DBSIZE",
+    "RENAME",
+    "RENAMENX",
+    "COPY",
+    "RANDOMKEY",
+    "FLUSHDB",
+    "FLUSHALL",
+    // strings
+    "SET",
+    "SETNX",
+    "SETEX",
+    "PSETEX",
+    "GET",
+    "GETSET",
+    "GETDEL",
+    "GETEX",
+    "MGET",
+    "MSET",
+    "MSETNX",
+    "INCR",
+    "DECR",
+    "INCRBY",
+    "DECRBY",
+    "INCRBYFLOAT",
+    "APPEND",
+    "STRLEN",
+    "GETRANGE",
+    "SUBSTR",
+    "SETRANGE",
+    // lists
+    "LPUSH",
+    "RPUSH",
+    "LPUSHX",
+    "RPUSHX",
+    "LPOP",
+    "RPOP",
+    "LLEN",
+    "LRANGE",
+    "LINDEX",
+    "LSET",
+    "LINSERT",
+    "LREM",
+    "LTRIM",
+    "RPOPLPUSH",
+    "LMOVE",
+    // hashes
+    "HSET",
+    "HSETNX",
+    "HMSET",
+    "HGET",
+    "HMGET",
+    "HDEL",
+    "HLEN",
+    "HEXISTS",
+    "HKEYS",
+    "HVALS",
+    "HGETALL",
+    "HINCRBY",
+    "HINCRBYFLOAT",
+    "HSTRLEN",
+    // sets
+    "SADD",
+    "SREM",
+    "SISMEMBER",
+    "SMISMEMBER",
+    "SCARD",
+    "SMEMBERS",
+    "SPOP",
+    "SRANDMEMBER",
+    "SMOVE",
+    "SINTER",
+    "SINTERSTORE",
+    "SUNION",
+    "SUNIONSTORE",
+    "SDIFF",
+    "SDIFFSTORE",
+    // sorted sets
+    "ZADD",
+    "ZSCORE",
+    "ZMSCORE",
+    "ZINCRBY",
+    "ZREM",
+    "ZCARD",
+    "ZCOUNT",
+    "ZRANGE",
+    "ZREVRANGE",
+    "ZRANGEBYSCORE",
+    "ZREVRANGEBYSCORE",
+    "ZRANK",
+    "ZREVRANK",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZPOPMIN",
+    "ZPOPMAX",
+];
+
+fn is_known_command(name: &str) -> bool {
+    COMMANDS.contains(&name)
 }
 
 fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
@@ -203,15 +383,36 @@ fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
             Response::new(zset::dispatch(app, name, argv))
         }
 
-        _ => Response::new(Reply::error(format!(
-            "ERR unknown command '{}', with args beginning with: {}",
-            to_display(&argv[0]),
-            argv[1..]
-                .iter()
-                .take(3)
-                .map(|a| format!("'{}'", to_display(a)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        _ => Response::new(unknown_command(argv)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `COMMANDS` gates what a transaction will queue, so a name the
+    /// router handles but the list omits would be rejected inside MULTI
+    /// while working fine outside it. This catches that drift.
+    #[test]
+    fn every_listed_command_reaches_a_handler() {
+        let mut app = App::new(crate::config::Config::default());
+        let mut session = Session::new();
+        for name in COMMANDS {
+            // Called with no arguments, so most reply with an arity
+            // error - anything except "unknown command" proves the
+            // router knows the name.
+            let argv = vec![name.as_bytes().to_vec()];
+            let response = execute(&mut app, &mut session, &argv);
+            if let Reply::Error(message) = &response.reply {
+                assert!(
+                    !message.contains("unknown command"),
+                    "{name} is listed in COMMANDS but the router does not handle it"
+                );
+            }
+            // MULTI opens a transaction; close it so the next name is
+            // executed rather than queued.
+            session.discard();
+        }
     }
 }

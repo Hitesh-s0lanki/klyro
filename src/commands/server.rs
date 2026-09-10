@@ -176,6 +176,7 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("connected_clients", app.stats.connected_clients);
             line!("maxclients", app.config.maxclients);
             line!("rejected_connections", app.stats.rejected_connections);
+            line!("watched_keys", app.store.watched_count());
         }
 
         "memory" => {

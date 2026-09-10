@@ -13,6 +13,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 fn remove_if_exists(path: &std::path::Path) {
@@ -25,10 +26,18 @@ fn remove_if_exists(path: &std::path::Path) {
 // threads - two tests can grab the same just-freed port before either
 // child binds it. A shared counter hands out unique ports
 // deterministically.
-static NEXT_PORT: AtomicU16 = AtomicU16::new(17300);
+//
+// The base is derived from the process id so that two test binaries
+// running at once - `cargo test` in two worktrees, say - get disjoint
+// ranges instead of fighting over the same ports.
+static NEXT_PORT: OnceLock<AtomicU16> = OnceLock::new();
 
 fn free_port() -> u16 {
-    NEXT_PORT.fetch_add(1, Ordering::Relaxed)
+    let counter = NEXT_PORT.get_or_init(|| {
+        let slot = (std::process::id() % 200) as u16;
+        AtomicU16::new(20_000 + slot * 200)
+    });
+    counter.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A parsed RESP reply.
@@ -348,32 +357,58 @@ impl KlyroServer {
         server
     }
 
-    /// Runs the binary with `args`, returning its captured stderr if it
-    /// exits instead of staying up - so a test can assert on a startup
-    /// failure.
+    /// Starts the binary expecting it *not* to come up - a bad config
+    /// file, say - and returns its captured stderr. Only this path
+    /// waits out the full deadline, because there is nothing to poll
+    /// for except the process ending.
     pub fn try_spawn_with_args(args: &[String]) -> Result<Child, String> {
-        let bin = env!("CARGO_BIN_EXE_klyro");
-        let mut child = Command::new(bin)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn the klyro binary");
-
-        // Poll rather than sleeping a fixed span: under `cargo test`'s
-        // parallel threads a process can take a while just to start.
+        let mut child = Self::launch(args);
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if child.try_wait().expect("try_wait").is_some() {
-                let mut out = String::new();
-                if let Some(mut e) = child.stderr.take() {
-                    let _ = e.read_to_string(&mut out);
-                }
-                return Err(out);
+                return Err(Self::drain_stderr(&mut child));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         Ok(child)
+    }
+
+    fn launch(args: &[String]) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_klyro"))
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn the klyro binary")
+    }
+
+    fn drain_stderr(child: &mut Child) -> String {
+        let mut out = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut out);
+        }
+        out
+    }
+
+    /// Starts the binary and waits until it accepts connections on
+    /// `port`, whichever comes first: a successful connect, or the
+    /// process giving up. Returns its stderr in the second case.
+    fn start_listening(args: &[String], port: u16) -> Result<Child, String> {
+        let mut child = Self::launch(args);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return Ok(child);
+            }
+            if child.try_wait().expect("try_wait").is_some() {
+                return Err(Self::drain_stderr(&mut child));
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                return Err(format!("never became ready on port {port}"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Starts a fresh server (on a newly picked port) against an
@@ -383,39 +418,39 @@ impl KlyroServer {
     }
 
     fn spawn(port: u16, dump_path: PathBuf) -> Self {
-        let args = vec![port.to_string(), dump_path.to_string_lossy().into_owned()];
-        Self::spawn_with_args(&args, port, dump_path)
+        // Retry on a fresh port if the bind loses a race with anything
+        // else on the machine; the caller only cares that it came up.
+        let mut port = port;
+        for attempt in 0..5 {
+            let args = vec![port.to_string(), dump_path.to_string_lossy().into_owned()];
+            match Self::start_listening(&args, port) {
+                Ok(child) => {
+                    return KlyroServer {
+                        port,
+                        dump_path,
+                        config_path: None,
+                        child: Some(child),
+                    }
+                }
+                Err(output) if attempt < 4 => {
+                    eprintln!("klyro on port {port} did not start ({output}); retrying");
+                    port = free_port();
+                }
+                Err(output) => panic!("klyro would not start: {output}"),
+            }
+        }
+        unreachable!("the loop either returns or panics")
     }
 
     fn spawn_with_args(args: &[String], port: u16, dump_path: PathBuf) -> Self {
-        let bin = env!("CARGO_BIN_EXE_klyro");
-        let mut child = Command::new(bin)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn the klyro binary");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().expect("try_wait") {
-                panic!("klyro exited early with status {status:?}");
-            }
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                panic!("klyro on port {port} never became ready");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
-        KlyroServer {
-            port,
-            dump_path,
-            config_path: None,
-            child: Some(child),
+        match Self::start_listening(args, port) {
+            Ok(child) => KlyroServer {
+                port,
+                dump_path,
+                config_path: None,
+                child: Some(child),
+            },
+            Err(output) => panic!("klyro would not start: {output}"),
         }
     }
 

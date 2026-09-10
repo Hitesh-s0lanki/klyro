@@ -315,7 +315,7 @@ impl Persist {
                     write_blob(&mut f, &value)?;
                 }
                 StoreType::List => {
-                    if let Some(list) = store.get_existing_list(&key) {
+                    if let Some(list) = store.read_list(&key) {
                         let items: Vec<Bytes> = list.iter().cloned().collect();
                         writeln!(f, "LIST {} {}", expire_at, items.len())?;
                         write_blob(&mut f, &key)?;
@@ -325,7 +325,7 @@ impl Persist {
                     }
                 }
                 StoreType::Hash => {
-                    if let Some(hash) = store.get_existing_hash(&key) {
+                    if let Some(hash) = store.read_hash(&key) {
                         let pairs: Vec<(Bytes, Bytes)> =
                             hash.iter().map(|(f, v)| (f.clone(), v.clone())).collect();
                         writeln!(f, "HASH {} {}", expire_at, pairs.len())?;
@@ -337,7 +337,7 @@ impl Persist {
                     }
                 }
                 StoreType::Set => {
-                    if let Some(set) = store.get_existing_set(&key) {
+                    if let Some(set) = store.read_set(&key) {
                         let members: Vec<Bytes> = set.iter().cloned().collect();
                         writeln!(f, "SET {} {}", expire_at, members.len())?;
                         write_blob(&mut f, &key)?;
@@ -347,7 +347,7 @@ impl Persist {
                     }
                 }
                 StoreType::Zset => {
-                    if let Some(zset) = store.get_existing_zset(&key) {
+                    if let Some(zset) = store.read_zset(&key) {
                         let pairs: Vec<(Bytes, f64)> =
                             zset.iter().map(|(m, s)| (m.to_vec(), s)).collect();
                         writeln!(f, "ZSET {} {}", expire_at, pairs.len())?;
@@ -498,7 +498,7 @@ mod tests {
         assert!(reloaded.ttl(b"greeting") > 290);
         assert_eq!(
             reloaded
-                .get_existing_list(b"mylist")
+                .read_list(b"mylist")
                 .unwrap()
                 .iter()
                 .cloned()
@@ -507,21 +507,18 @@ mod tests {
         );
         assert_eq!(
             reloaded
-                .get_existing_hash(b"user")
+                .read_hash(b"user")
                 .unwrap()
                 .get(b"name".as_slice())
                 .unwrap(),
             b"Alice"
         );
         assert!(reloaded
-            .get_existing_set(b"tags")
+            .read_set(b"tags")
             .unwrap()
             .contains(b"fast".as_slice()));
         assert_eq!(
-            reloaded
-                .get_existing_zset(b"board")
-                .unwrap()
-                .score(b"alice"),
+            reloaded.read_zset(b"board").unwrap().score(b"alice"),
             Some(100.0)
         );
         cleanup(&path);
@@ -547,10 +544,7 @@ mod tests {
         let mut reloaded = Store::new();
         Persist::new(path.to_str().unwrap()).load(&mut reloaded);
         assert_eq!(reloaded.get_string(&key), Some(value));
-        assert_eq!(
-            reloaded.get_existing_list(b"l").unwrap().front().unwrap(),
-            b"a\nb"
-        );
+        assert_eq!(reloaded.read_list(b"l").unwrap().front().unwrap(), b"a\nb");
         cleanup(&path);
     }
 
@@ -578,21 +572,21 @@ mod tests {
         Persist::new(path.to_str().unwrap()).load(&mut store);
 
         assert_eq!(store.get_string(b"greeting"), Some(b"hello there".to_vec()));
-        assert_eq!(store.get_existing_list(b"mylist").unwrap().len(), 2);
+        assert_eq!(store.read_list(b"mylist").unwrap().len(), 2);
         assert_eq!(
             store
-                .get_existing_hash(b"user")
+                .read_hash(b"user")
                 .unwrap()
                 .get(b"name".as_slice())
                 .unwrap(),
             b"Alice"
         );
         assert!(store
-            .get_existing_set(b"tags")
+            .read_set(b"tags")
             .unwrap()
             .contains(b"fast".as_slice()));
         assert_eq!(
-            store.get_existing_zset(b"board").unwrap().score(b"alice"),
+            store.read_zset(b"board").unwrap().score(b"alice"),
             Some(100.0)
         );
         cleanup(&path);

@@ -102,6 +102,7 @@ uptime_in_days:0
 connected_clients:1
 maxclients:10000
 rejected_connections:0
+watched_keys:0
 
 # Memory
 used_memory:5235
@@ -147,7 +148,7 @@ connection buffers included, not the keyspace alone.
 [../src/commands/mod.rs](../src/commands/mod.rs) and nothing else, so a
 write's internal lookup never lands in the ratio. The dispatcher measures
 the delta in the store's lookup counters across a single command, which
-keeps the accounting in one place instead of spread across 107 handlers.
+keeps the accounting in one place instead of spread across 117 handlers.
 Internal type checks deliberately use a non-counting lookup, otherwise
 every read would register as two.
 
@@ -155,6 +156,11 @@ every read would register as two.
 command availability on it, so INFO reports the Redis release whose
 command shapes Klyro implements. It is not a claim to be that server;
 `klyro_version` sits right above it.
+
+**`watched_keys` counts keys, not clients.** It is the size of the
+WATCH registry in `store.rs`, so it goes to zero once every watching
+connection has run `EXEC`, `DISCARD`, `UNWATCH`, or disconnected. See
+[transactions.md](transactions.md).
 
 **The keyspace section is the one O(n) part of INFO.** It walks the
 keyspace to count keys, keys with a TTL, and the per-type breakdown.
