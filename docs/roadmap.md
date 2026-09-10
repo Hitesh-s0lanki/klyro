@@ -89,6 +89,14 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
   Still no CI (nothing runs `cargo test` automatically on push).
 - No license file.
 
+## Beyond Redis compatibility
+
+Klyro's memory structures for AI agents - Search, Vector, and Hybrid
+retrieval as a sixth native data type behind a `MEM.*` command family -
+are planned separately in
+[memory-structures.md](memory-structures.md). That work is independent
+of everything above and does not block, or wait on, any of it.
+
 ## Suggested next steps (roughly smallest/lowest-risk first)
 
 1. ~~**Automated test suite**~~ Done — see above.
