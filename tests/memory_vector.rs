@@ -62,11 +62,17 @@ fn cosine_ranks_by_direction_not_by_magnitude() {
     // as similar, so those two tie and break on id.
     assert_eq!(ranked[2], "orthogonal");
     assert_eq!(
-        field(&hits.items()[0], "vector_score").parse::<f64>().unwrap(),
+        field(&hits.items()[0], "vector_score")
+            .parse::<f64>()
+            .unwrap(),
         1.0
     );
     assert!(
-        field(&hits.items()[2], "vector_score").parse::<f64>().unwrap().abs() < 1e-6,
+        field(&hits.items()[2], "vector_score")
+            .parse::<f64>()
+            .unwrap()
+            .abs()
+            < 1e-6,
         "an orthogonal vector scores zero under cosine"
     );
 }
@@ -75,21 +81,33 @@ fn cosine_ranks_by_direction_not_by_magnitude() {
 fn l2_ranks_by_distance() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("MEM.CREATE ns MODE VECTOR DIM 2 METRIC L2"), ok());
+    assert_eq!(
+        client.send("MEM.CREATE ns MODE VECTOR DIM 2 METRIC L2"),
+        ok()
+    );
     add(&mut client, "near", "x", &[1.0, 1.0]);
     add(&mut client, "far", "y", &[9.0, 9.0]);
-    assert_eq!(ids(&vsearch(&mut client, &[1.0, 2.0], &[])), vec!["near", "far"]);
+    assert_eq!(
+        ids(&vsearch(&mut client, &[1.0, 2.0], &[])),
+        vec!["near", "far"]
+    );
 }
 
 #[test]
 fn inner_product_rewards_magnitude() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("MEM.CREATE ns MODE VECTOR DIM 2 METRIC IP"), ok());
+    assert_eq!(
+        client.send("MEM.CREATE ns MODE VECTOR DIM 2 METRIC IP"),
+        ok()
+    );
     add(&mut client, "small", "x", &[1.0, 0.0]);
     add(&mut client, "large", "y", &[5.0, 0.0]);
     // Unlike cosine, length is part of the score here.
-    assert_eq!(ids(&vsearch(&mut client, &[1.0, 0.0], &[])), vec!["large", "small"]);
+    assert_eq!(
+        ids(&vsearch(&mut client, &[1.0, 0.0], &[])),
+        vec!["large", "small"]
+    );
 }
 
 #[test]

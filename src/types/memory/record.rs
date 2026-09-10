@@ -61,7 +61,10 @@ impl MemoryRecord {
     /// whether the field is new, so `MEM.SETMETA` can count additions
     /// the way `HSET` does.
     pub fn set_meta(&mut self, field: Bytes, value: Bytes) -> bool {
-        match self.meta.binary_search_by(|(f, _)| f.as_slice().cmp(&field)) {
+        match self
+            .meta
+            .binary_search_by(|(f, _)| f.as_slice().cmp(&field))
+        {
             Ok(at) => {
                 self.meta[at].1 = value;
                 false

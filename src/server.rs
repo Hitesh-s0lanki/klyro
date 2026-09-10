@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::app::App;
 use crate::commands;
-use crate::resp::{self, Protocol, Reply};
+use crate::resp::{self, Reply};
+use crate::session::Session;
 
 /// How much to read from a socket at a time.
 const READ_CHUNK: usize = 16 * 1024;
@@ -23,9 +24,9 @@ const READ_CHUNK: usize = 16 * 1024;
 pub struct Conn {
     stream: TcpStream,
     want_close: bool,
-    /// Negotiated by HELLO, and RESP2 until then - the version every
-    /// client starts out speaking.
-    protocol: Protocol,
+    /// This connection's own state: negotiated protocol, open
+    /// transaction, and watched keys.
+    session: Session,
     rbuf: Vec<u8>,
     wbuf: Vec<u8>,
     wbuf_sent: usize,
@@ -36,7 +37,7 @@ impl Conn {
         Conn {
             stream,
             want_close: false,
-            protocol: Protocol::Resp2,
+            session: Session::new(),
             rbuf: Vec::new(),
             wbuf: Vec::new(),
             wbuf_sent: 0,
@@ -48,7 +49,7 @@ impl Conn {
     /// (see [`Conn::over_output_limit`]) rather than silently returning
     /// a partial answer.
     fn push(&mut self, reply: &Reply) {
-        resp::encode(reply, self.protocol, &mut self.wbuf);
+        resp::encode(reply, self.session.protocol, &mut self.wbuf);
     }
 
     fn over_output_limit(&self, limit: usize) -> bool {
@@ -160,11 +161,11 @@ fn process_requests(conn: &mut Conn, app: &mut App) {
             Ok(None) => break,
             Ok(Some(request)) => {
                 conn.rbuf.drain(..request.consumed);
-                if let Some(response) = commands::dispatch(app, &request.argv) {
+                if let Some(response) = commands::dispatch(app, &mut conn.session, &request.argv) {
                     // HELLO's own reply goes out in the version it
                     // switched to, which is what clients expect.
                     if let Some(protocol) = response.protocol {
-                        conn.protocol = protocol;
+                        conn.session.protocol = protocol;
                     }
                     conn.push(&response.reply);
                     if response.close {
@@ -276,7 +277,11 @@ fn poll_once(
         }
     }
     for fd in to_close {
-        conns.remove(&fd);
+        // Releasing the watches matters: the registry would otherwise
+        // keep entries alive for a client that has gone away.
+        if let Some(mut conn) = conns.remove(&fd) {
+            conn.session.unwatch_all(&mut app.store);
+        }
     }
 
     app.stats.connected_clients = conns.len();

@@ -76,7 +76,11 @@ fn normalize(values: &mut [f32]) {
     }
     let spread = high - low;
     for value in values.iter_mut() {
-        *value = if spread > 0.0 { (*value - low) / spread } else { 1.0 };
+        *value = if spread > 0.0 {
+            (*value - low) / spread
+        } else {
+            1.0
+        };
     }
 }
 
@@ -143,12 +147,26 @@ pub fn fuse<'a>(
     };
 
     for (id, score) in &keyword {
-        let row = row_for(id, &mut ids, &mut raw_keyword, &mut raw_vector, &mut had_keyword, &mut had_vector);
+        let row = row_for(
+            id,
+            &mut ids,
+            &mut raw_keyword,
+            &mut raw_vector,
+            &mut had_keyword,
+            &mut had_vector,
+        );
         raw_keyword[row] = *score;
         had_keyword[row] = true;
     }
     for (id, score) in &vector {
-        let row = row_for(id, &mut ids, &mut raw_keyword, &mut raw_vector, &mut had_keyword, &mut had_vector);
+        let row = row_for(
+            id,
+            &mut ids,
+            &mut raw_keyword,
+            &mut raw_vector,
+            &mut had_keyword,
+            &mut had_vector,
+        );
         raw_vector[row] = *score;
         had_vector[row] = true;
     }
@@ -205,7 +223,10 @@ fn component(raw: &[f32], present: &[bool], fusion: Fusion) -> Vec<f32> {
             normalize(&mut values);
             values
         }
-        Fusion::Rrf => ranks(&found).into_iter().map(|r| 1.0 / (RRF_K + r)).collect(),
+        Fusion::Rrf => ranks(&found)
+            .into_iter()
+            .map(|r| 1.0 / (RRF_K + r))
+            .collect(),
     };
     scaled.reverse(); // popped from the back below, restoring input order
 
@@ -284,7 +305,12 @@ mod tests {
     /// Weights that isolate one component, so a test can assert about
     /// it without the other three moving the answer.
     fn only_keyword() -> Weights {
-        Weights { keyword: 1.0, vector: 0.0, recency: 0.0, importance: 0.0 }
+        Weights {
+            keyword: 1.0,
+            vector: 0.0,
+            recency: 0.0,
+            importance: 0.0,
+        }
     }
 
     fn fuse_with(
@@ -360,7 +386,12 @@ mod tests {
         let vector_first = fuse_with(
             vec![("a", 9.0), ("b", 1.0)],
             vec![("a", 0.1), ("b", 0.9)],
-            Weights { keyword: 0.0, vector: 1.0, recency: 0.0, importance: 0.0 },
+            Weights {
+                keyword: 0.0,
+                vector: 1.0,
+                recency: 0.0,
+                importance: 0.0,
+            },
             Fusion::Linear,
         );
         assert_eq!(order(&vector_first)[0], "b");
@@ -388,10 +419,19 @@ mod tests {
         let hits = fuse_with(
             vec![("a", 1.0001), ("b", 1.0)],
             vec![("b", 0.9), ("a", 0.1)],
-            Weights { keyword: 0.5, vector: 0.5, recency: 0.0, importance: 0.0 },
+            Weights {
+                keyword: 0.5,
+                vector: 0.5,
+                recency: 0.0,
+                importance: 0.0,
+            },
             Fusion::Rrf,
         );
-        assert_eq!(order(&hits), vec!["a", "b"], "each led one list, so ties break on id");
+        assert_eq!(
+            order(&hits),
+            vec!["a", "b"],
+            "each led one list, so ties break on id"
+        );
         approx(hits[0].score, 0.5 / 61.0 + 0.5 / 62.0);
     }
 
@@ -406,7 +446,12 @@ mod tests {
             vec![(b"old".to_vec(), 1.0), (b"fresh".to_vec(), 1.0)],
             Vec::new(),
             |id| records.iter().find(|r| r.id == id),
-            Weights { keyword: 0.0, vector: 0.0, recency: 1.0, importance: 0.0 },
+            Weights {
+                keyword: 0.0,
+                vector: 0.0,
+                recency: 1.0,
+                importance: 0.0,
+            },
             Fusion::Linear,
             Duration::from_secs(3600),
             now,

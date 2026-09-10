@@ -68,7 +68,7 @@ impl App {
             let dropped = memory.sweep_expired(self.config.mem_max_terms_per_doc);
             if dropped > 0 {
                 self.stats.memory_records_expired += dropped as u64;
-                self.store.mark_dirty();
+                self.store.mark_dirty(&key);
             }
         }
     }

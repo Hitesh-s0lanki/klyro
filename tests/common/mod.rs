@@ -13,6 +13,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 fn remove_if_exists(path: &std::path::Path) {
@@ -25,13 +26,22 @@ fn remove_if_exists(path: &std::path::Path) {
 // threads - two tests can grab the same just-freed port before either
 // child binds it. A shared counter hands out unique ports
 // deterministically.
-static NEXT_PORT: AtomicU16 = AtomicU16::new(17300);
+//
+// The base is derived from the process id, so two test binaries running
+// at once - `cargo test` in two worktrees, say - walk disjoint ranges
+// instead of fighting over the same ports. The retry below covers
+// whatever is left.
+static NEXT_PORT: OnceLock<AtomicU16> = OnceLock::new();
 
 /// How many ports a server tries before giving up.
 const ATTEMPTS: usize = 8;
 
 fn free_port() -> u16 {
-    NEXT_PORT.fetch_add(1, Ordering::Relaxed)
+    let counter = NEXT_PORT.get_or_init(|| {
+        let slot = (std::process::id() % 200) as u16;
+        AtomicU16::new(20_000 + slot * 200)
+    });
+    counter.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A parsed RESP reply.

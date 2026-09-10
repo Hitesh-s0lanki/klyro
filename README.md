@@ -164,9 +164,9 @@ Node.js examples and the list of clients verified against Klyro.
 
 ## Commands
 
-122 commands: the 107 Redis-shaped ones, plus the 15 `MEM.*` commands
-that have no Redis equivalent. Reply types match Redis's, which is what
-lets stock client libraries decode them; the tables below name the type
+132 commands: 117 Redis-shaped ones, plus the 15 `MEM.*` commands that
+have no Redis equivalent. Reply types match Redis's, which is what lets
+stock client libraries decode them; the tables below name the type
 rather than the literal bytes.
 
 ### Generic (any type)
@@ -202,6 +202,36 @@ rather than the literal bytes.
 
 `COPY` is a deep copy: mutating the destination afterwards leaves the
 source untouched. `RENAME` and `COPY` both carry the TTL across.
+
+### Transactions
+
+| Command | Reply |
+|---|---|
+| `MULTI` | `OK`; later commands answer `QUEUED` until EXEC or DISCARD |
+| `EXEC` | array of the queued commands' replies, or a null array if a watched key changed |
+| `DISCARD` | `OK`, throwing the queue away |
+| `WATCH key [key ...]` | `OK` |
+| `UNWATCH` | `OK`, releasing every watch |
+| `RESET` | `RESET`; clears the transaction, the watches, and the protocol |
+
+Queued commands run back to back on the single event-loop thread, so no
+other client's command interleaves. There is no rollback: a command that
+fails inside `EXEC` reports its error as one element of the reply and
+the rest still run.
+
+`WATCH` is optimistic locking. If any watched key is modified between
+`WATCH` and `EXEC` - by another client or by this one - the transaction
+does not run and `EXEC` replies with a null array, which client
+libraries surface as "retry". Reads never disturb a watch.
+
+```python
+with r.pipeline() as pipe:
+    pipe.watch("counter")
+    current = int(pipe.get("counter"))
+    pipe.multi()
+    pipe.set("counter", current + 1)
+    pipe.execute()          # raises WatchError if someone else got there first
+```
 
 ### Strings
 
@@ -421,6 +451,8 @@ src/
     zset.rs      -   ranks, score-range queries, ZINCRBY, the pops
     memory.rs    -   the MEM.* family: CRUD, SEARCH/VSEARCH/QUERY
     server.rs    -   PING/ECHO/HELLO/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
+    transaction.rs - MULTI/EXEC/DISCARD/WATCH/UNWATCH/RESET
+  session.rs     - per-connection state: protocol, open transaction, watched keys
   store.rs       - the keyspace: maps keys to typed values, with expiry
   persist.rs     - save/load the whole keyspace to a dump file
   app.rs         - bundles Store + Persist + the running flag shared by the above
@@ -463,6 +495,7 @@ tests/           - the integration suite (see "Test" above)
   hashes.rs      -  HSET/HMGET/HSETNX/HEXISTS/HKEYS/HINCRBY
   sets.rs        -  SINTER/SUNION/SDIFF and STORE forms, SPOP, SMOVE
   sortedsets.rs  -  ranks, score ranges, ZINCRBY, ZPOPMIN/MAX, ZREMRANGE*
+  transactions.rs-  MULTI/EXEC/DISCARD, WATCH's optimistic locking
   scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
   persistence.rs -  save/kill/reload round-trip, the version 1 dump format
   admin.rs       -  INFO sections and counters, CONFIG, HELLO negotiation
@@ -523,10 +556,10 @@ upgrade. They are rewritten as version 3 on the next save. See
 See [docs/redis-feature-gap.md](docs/redis-feature-gap.md) for the full
 comparison against Redis. The ones worth knowing before you use this:
 
-- No transactions (`MULTI`/`EXEC`), pub/sub, scripting, or blocking
-  commands (`BLPOP`), so no queues and no server-side atomic
-  read-modify-write beyond what a single command does.
-- Only the 122 commands listed above. A client library will happily
+- No pub/sub, scripting (`EVAL`), or blocking commands (`BLPOP`), so no
+  queues and no server-side scripting. `MULTI`/`EXEC` with `WATCH` does
+  cover atomic read-modify-write.
+- Only the 132 commands listed above. A client library will happily
   call anything else and get back `ERR unknown command`.
 - Memory indexes do not embed text: the client supplies the vector.
   Vector search is an exact brute-force scan, capped by `mem-max-scan`

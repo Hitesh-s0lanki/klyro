@@ -33,7 +33,7 @@ use filter::Filter;
 use fuse::{fuse, Fusion};
 use record::MemoryRecord;
 use text::TextIndex;
-use vector::{Metric, VectorIndex, VectorError};
+use vector::{Metric, VectorError, VectorIndex};
 
 /// Wall-clock milliseconds since the epoch. Timestamps cross the wire
 /// and land in dumps as absolute instants, so downtime is accounted
@@ -163,11 +163,16 @@ pub enum MemoryError {
     /// A brute-force scan of this index would exceed `mem-max-scan`.
     /// Refused rather than answered from part of the index, because a
     /// silently partial answer is worse than none.
-    TooLargeToScan { records: usize, limit: usize },
+    TooLargeToScan {
+        records: usize,
+        limit: usize,
+    },
     /// `NX` was given and the id exists, or `XX` and it does not.
     ExistenceUnmet,
     /// `mem-max-records` would be exceeded.
-    Full { limit: usize },
+    Full {
+        limit: usize,
+    },
 }
 
 impl From<VectorError> for MemoryError {
@@ -260,7 +265,9 @@ impl Memory {
     }
 
     pub fn get(&self, id: &[u8]) -> Option<&MemoryRecord> {
-        self.records.get(id).filter(|r| r.is_live(SystemTime::now()))
+        self.records
+            .get(id)
+            .filter(|r| r.is_live(SystemTime::now()))
     }
 
     pub fn vector_of(&self, record: &MemoryRecord) -> Option<&[f32]> {
@@ -310,7 +317,12 @@ impl Memory {
         (batch, next)
     }
 
-    pub fn add(&mut self, request: AddRequest, max_terms: usize, max_records: usize) -> Result<Bytes, MemoryError> {
+    pub fn add(
+        &mut self,
+        request: AddRequest,
+        max_terms: usize,
+        max_records: usize,
+    ) -> Result<Bytes, MemoryError> {
         let now = SystemTime::now();
         let id = match request.id {
             Some(id) => id,
@@ -391,7 +403,11 @@ impl Memory {
         true
     }
 
-    pub fn set_meta(&mut self, id: &[u8], pairs: Vec<(Bytes, Bytes)>) -> Result<usize, MemoryError> {
+    pub fn set_meta(
+        &mut self,
+        id: &[u8],
+        pairs: Vec<(Bytes, Bytes)>,
+    ) -> Result<usize, MemoryError> {
         let now = SystemTime::now();
         let record = self
             .records
@@ -592,13 +608,20 @@ impl Memory {
     /// indexes as it goes. Vectors come back already normalized, so
     /// this must not renormalize - `VectorIndex::insert` is idempotent
     /// on a unit vector, which is what makes that safe.
-    pub fn load_record(&mut self, record: MemoryRecord, vector: Option<Vec<f32>>, max_terms: usize) {
+    pub fn load_record(
+        &mut self,
+        record: MemoryRecord,
+        vector: Option<Vec<f32>>,
+        max_terms: usize,
+    ) {
         let mut record = record;
         if self.config.mode.indexes_text() {
             self.text.index(&record.id, None, &record.text, max_terms);
         }
         record.slot = match vector {
-            Some(values) if self.config.mode.stores_vectors() && values.len() == self.config.dim => {
+            Some(values)
+                if self.config.mode.stores_vectors() && values.len() == self.config.dim =>
+            {
                 Some(self.vectors.insert(&values))
             }
             _ => None,
@@ -658,7 +681,12 @@ mod tests {
     #[test]
     fn add_indexes_text_and_stores_the_vector() {
         let mut memory = hybrid();
-        add(&mut memory, "m1", "User prefers PostgreSQL", Some(vec![1.0, 0.0, 0.0]));
+        add(
+            &mut memory,
+            "m1",
+            "User prefers PostgreSQL",
+            Some(vec![1.0, 0.0, 0.0]),
+        );
         assert_eq!(memory.len(), 1);
         assert_eq!(memory.vector_count(), 1);
         let hits = memory
@@ -876,7 +904,12 @@ mod tests {
     fn scan_walks_every_record_once() {
         let mut memory = hybrid();
         for i in 0..7 {
-            add(&mut memory, &format!("m{i}"), "text", Some(vec![1.0, 0.0, 0.0]));
+            add(
+                &mut memory,
+                &format!("m{i}"),
+                "text",
+                Some(vec![1.0, 0.0, 0.0]),
+            );
         }
         let mut seen = Vec::new();
         let mut cursor = 0;

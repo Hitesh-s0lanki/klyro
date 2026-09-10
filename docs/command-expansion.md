@@ -147,7 +147,7 @@ from it worth recording here:
 - **The hit ratio is measured as a delta around dispatch.** The store
   counts every lookup; the dispatcher records the change across one
   command and attributes it only if the command is read-only. That put
-  the accounting in one place instead of across 107 handlers. Internal
+  the accounting in one place instead of across 117 handlers. Internal
   type checks had to switch to a non-counting lookup, or every read
   would have registered as two - which is exactly what the first
   version did, caught by a smoke test.

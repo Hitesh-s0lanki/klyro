@@ -275,11 +275,26 @@ mod tests {
 
     fn indexed() -> TextIndex {
         let mut index = TextIndex::new();
-        index.index(b"m1", None, b"User prefers PostgreSQL for backend projects.", CAP);
-        index.index(b"m2", None, b"User is currently building a database administration tool.", CAP);
+        index.index(
+            b"m1",
+            None,
+            b"User prefers PostgreSQL for backend projects.",
+            CAP,
+        );
+        index.index(
+            b"m2",
+            None,
+            b"User is currently building a database administration tool.",
+            CAP,
+        );
         index.index(b"m3", None, b"User likes modern developer tools.", CAP);
         index.index(b"m4", None, b"User previously worked with MySQL.", CAP);
-        index.index(b"m5", None, b"User is building Basora, a PostgreSQL developer application.", CAP);
+        index.index(
+            b"m5",
+            None,
+            b"User is building Basora, a PostgreSQL developer application.",
+            CAP,
+        );
         index
     }
 
@@ -325,7 +340,11 @@ mod tests {
         let unfiltered = index.search(&[b"postgresql".to_vec()], 1, |_| true);
         let excluded = unfiltered[0].0.clone();
         let hits = index.search(&[b"postgresql".to_vec()], 1, |id| id != excluded);
-        assert_eq!(hits.len(), 1, "a filter must not empty a page that had matches");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a filter must not empty a page that had matches"
+        );
         assert_ne!(hits[0].0, excluded);
     }
 
@@ -337,7 +356,9 @@ mod tests {
         let hits = index.search(&[b"postgresql".to_vec()], 10, |_| true);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, b"m5".to_vec());
-        assert!(index.search(&[b"prefers".to_vec()], 10, |_| true).is_empty());
+        assert!(index
+            .search(&[b"prefers".to_vec()], 10, |_| true)
+            .is_empty());
     }
 
     #[test]
@@ -370,6 +391,8 @@ mod tests {
     #[test]
     fn searching_an_empty_index_returns_nothing() {
         let index = TextIndex::new();
-        assert!(index.search(&[b"anything".to_vec()], 10, |_| true).is_empty());
+        assert!(index
+            .search(&[b"anything".to_vec()], 10, |_| true)
+            .is_empty());
     }
 }

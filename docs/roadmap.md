@@ -15,7 +15,8 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
   RESP2 and RESP3. Values are binary-safe, replies are never silently
   truncated, and redis-py, go-redis, and ioredis all work unmodified.
   See [resp-protocol.md](resp-protocol.md).
-- No transactions (`MULTI`/`EXEC`).
+- ~~No transactions (`MULTI`/`EXEC`)~~ **Done (2026-09-10).** With
+  `WATCH` for optimistic locking. See [transactions.md](transactions.md).
 - No pub/sub (`SUBSCRIBE`/`PUBLISH`).
 - ~~No official client library or CLI~~ **Moot (2026-09-10).** Any
   Redis client works, `redis-cli` included, so the three hand-written
@@ -111,10 +112,9 @@ not block, or wait on, any of it.
 6. ~~**Values with embedded spaces in List/Set/Zset**~~ Done - see
    above.
 7. ~~**A binary-safe protocol (RESP-like)**~~ Done - see above.
-8. **Transactions (`MULTI`/`EXEC`/`WATCH`)** - now the top of the list.
-   The command layer already returns a reply value instead of writing to
-   a socket, which is most of what queuing a transaction needs.
-9. **Pub/sub, then blocking commands** - both need the event loop to
-   park and wake a connection, the one piece RESP did not bring.
+8. ~~**Transactions (`MULTI`/`EXEC`/`WATCH`)**~~ Done - see above.
+9. **Pub/sub, then blocking commands** - now the top of the list. Both
+   need the event loop to park and wake a connection, the one piece
+   neither RESP nor transactions brought.
 10. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
     separable efforts; not blocking anything else on this list.

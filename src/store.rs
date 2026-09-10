@@ -83,12 +83,24 @@ struct Entry {
     expire_at: Option<SystemTime>, // None = never expires
 }
 
+/// A key some session is WATCHing. `stamp` changes every time the key
+/// is modified, which is how EXEC decides whether to abort; `watchers`
+/// is a refcount so the entry disappears once nobody cares.
+struct WatchEntry {
+    stamp: u64,
+    watchers: usize,
+}
+
 pub struct Store {
     map: HashMap<Bytes, Entry>,
     dirty: usize,
     expired: u64,
     lookup_hits: u64,
     lookup_misses: u64,
+    /// Only keys under active WATCH appear here, so the cost is bounded
+    /// by how much WATCH is actually used rather than by keyspace size.
+    watched: HashMap<Bytes, WatchEntry>,
+    next_stamp: u64,
 }
 
 impl Store {
@@ -99,7 +111,57 @@ impl Store {
             expired: 0,
             lookup_hits: 0,
             lookup_misses: 0,
+            watched: HashMap::new(),
+            next_stamp: 0,
         }
+    }
+
+    /// Records that `key` changed: marks the store dirty so the next
+    /// autosave writes it, and moves the key's watch stamp so any
+    /// transaction watching it will abort.
+    ///
+    /// Every mutating path goes through here. That is the whole point -
+    /// a mutation that skipped it would be both invisible to autosave
+    /// and invisible to WATCH.
+    fn touch(&mut self, key: &[u8]) {
+        self.dirty += 1;
+        if let Some(entry) = self.watched.get_mut(key) {
+            self.next_stamp += 1;
+            entry.stamp = self.next_stamp;
+        }
+    }
+
+    /// Starts watching `key`, returning the stamp to compare at EXEC.
+    pub fn watch(&mut self, key: &[u8]) -> u64 {
+        self.next_stamp += 1;
+        let fresh = self.next_stamp;
+        let entry = self.watched.entry(key.to_vec()).or_insert(WatchEntry {
+            stamp: fresh,
+            watchers: 0,
+        });
+        entry.watchers += 1;
+        entry.stamp
+    }
+
+    /// Releases one watcher's interest in `key`.
+    pub fn unwatch(&mut self, key: &[u8]) {
+        if let Some(entry) = self.watched.get_mut(key) {
+            entry.watchers -= 1;
+            if entry.watchers == 0 {
+                self.watched.remove(key);
+            }
+        }
+    }
+
+    /// The key's current stamp. A watcher comparing this against the
+    /// stamp it was handed sees any modification in between.
+    pub fn watch_stamp(&self, key: &[u8]) -> u64 {
+        self.watched.get(key).map_or(0, |e| e.stamp)
+    }
+
+    /// How many distinct keys are currently watched, for INFO.
+    pub fn watched_count(&self) -> usize {
+        self.watched.len()
     }
 
     fn is_live(entry: &Entry, now: SystemTime) -> bool {
@@ -218,7 +280,7 @@ impl Store {
             return false; // also lazily expires
         }
         self.map.remove(key);
-        self.dirty += 1;
+        self.touch(key);
         true
     }
 
@@ -229,7 +291,7 @@ impl Store {
             .is_some_and(|e| e.value.is_empty_collection());
         if should_delete {
             self.map.remove(key);
-            self.dirty += 1;
+            self.touch(key);
         }
     }
 
@@ -240,7 +302,7 @@ impl Store {
         match self.find_mut(key) {
             Some(e) => {
                 e.expire_at = at;
-                self.dirty += 1;
+                self.touch(key);
                 true
             }
             None => false,
@@ -285,7 +347,8 @@ impl Store {
         }
         let entry = self.map.remove(key).expect("find() proved it is live");
         self.map.insert(new_key.to_vec(), entry);
-        self.dirty += 1;
+        self.touch(key);
+        self.touch(new_key);
         true
     }
 
@@ -299,15 +362,20 @@ impl Store {
         }
         let entry = self.map.get(key).expect("find() proved it is live").clone();
         self.map.insert(dest.to_vec(), entry);
-        self.dirty += 1;
+        self.touch(dest);
         Some(true)
     }
 
     /// Drops every key. Returns how many were removed.
     pub fn flush(&mut self) -> usize {
         let removed = self.map.len();
+        let keys: Vec<Bytes> = self.map.keys().cloned().collect();
         self.map.clear();
         self.dirty += 1;
+        // Every watched key that existed has just been removed.
+        for key in keys {
+            self.touch(&key);
+        }
         removed
     }
 
@@ -343,7 +411,7 @@ impl Store {
             .collect();
         for key in expired {
             self.map.remove(&key);
-            self.dirty += 1;
+            self.touch(&key);
             self.expired += 1;
         }
     }
@@ -403,7 +471,7 @@ impl Store {
     /// Clears any existing expiry, matching Redis's SET - always
     /// overwrites regardless of the key's previous type.
     pub fn set_string(&mut self, key: &[u8], value: &[u8]) {
-        self.dirty += 1;
+        self.touch(key);
         self.map.insert(
             key.to_vec(),
             Entry {
@@ -416,7 +484,7 @@ impl Store {
     /// Keeps any existing expiry, matching Redis's INCR/DECR/APPEND/
     /// SETRANGE (an in-place mutation, not a fresh SET).
     pub fn update_string(&mut self, key: &[u8], value: &[u8]) {
-        self.dirty += 1;
+        self.touch(key);
         if let Some(e) = self.find_mut(key) {
             e.value = Value::Str(value.to_vec());
         } else {
@@ -443,15 +511,16 @@ impl Store {
 }
 
 impl Store {
-    /// Marks the keyspace changed, so autosave notices.
+    /// Marks `key` changed, so autosave notices and any WATCH on it
+    /// breaks.
     ///
-    /// Most types record this inside `get_or_create_*`, which is only
-    /// ever called to mutate. A memory index is reached through
-    /// `get_existing_memory`, which cannot tell `MEM.GET` from
+    /// The other types split this by accessor - `read_*` touches
+    /// nothing, `write_*` reports the change. A memory index is reached
+    /// through `get_existing_memory`, which cannot tell `MEM.GET` from
     /// `MEM.ADD`, so its mutating commands say so explicitly rather
     /// than having every read look like a write.
-    pub fn mark_dirty(&mut self) {
-        self.dirty += 1;
+    pub fn mark_dirty(&mut self, key: &[u8]) {
+        self.touch(key);
     }
 
     /// Installs a new memory index at `key`. Returns `false` without
@@ -462,7 +531,7 @@ impl Store {
         if self.exists(key) {
             return false;
         }
-        self.dirty += 1;
+        self.touch(key);
         self.map.insert(
             key.to_vec(),
             Entry {
@@ -504,10 +573,10 @@ impl Store {
 /// "get_existing" never creates. Both return `None` if the key holds a
 /// different type.
 macro_rules! define_collection_accessors {
-    ($get_or_create:ident, $get_existing:ident, $variant:ident, $ty:ty, $default:expr) => {
+    ($get_or_create:ident, $read:ident, $write:ident, $variant:ident, $ty:ty, $default:expr) => {
         impl Store {
             pub fn $get_or_create(&mut self, key: &[u8]) -> Option<&mut $ty> {
-                self.dirty += 1; // every caller is about to mutate the result
+                self.touch(key); // every caller is about to mutate the result
                 match self.find(key) {
                     Some(e) => {
                         if !matches!(e.value, Value::$variant(_)) {
@@ -530,7 +599,30 @@ macro_rules! define_collection_accessors {
                 }
             }
 
-            pub fn $get_existing(&mut self, key: &[u8]) -> Option<&mut $ty> {
+            /// Read-only access. Does not mark the store dirty and
+            /// does not disturb a WATCH, so read commands use this one.
+            pub fn $read(&mut self, key: &[u8]) -> Option<&$ty> {
+                match self.find(key) {
+                    Some(e) => match &e.value {
+                        Value::$variant(v) => Some(v),
+                        _ => None,
+                    },
+                    None => None,
+                }
+            }
+
+            /// Mutable access, for a caller that intends to change the
+            /// collection. Marks the store dirty and moves the key's
+            /// watch stamp.
+            pub fn $write(&mut self, key: &[u8]) -> Option<&mut $ty> {
+                // Check the type first, so a WRONGTYPE command does not
+                // register as a modification.
+                let holds_type =
+                    matches!(self.find(key).map(|e| &e.value), Some(Value::$variant(_)));
+                if !holds_type {
+                    return None;
+                }
+                self.touch(key);
                 match self.find_mut(key) {
                     Some(e) => match &mut e.value {
                         Value::$variant(v) => Some(v),
@@ -545,22 +637,25 @@ macro_rules! define_collection_accessors {
 
 define_collection_accessors!(
     get_or_create_list,
-    get_existing_list,
+    read_list,
+    write_list,
     List,
     List,
     List::new()
 );
 define_collection_accessors!(
     get_or_create_hash,
-    get_existing_hash,
+    read_hash,
+    write_hash,
     Hash,
     Hash,
     Hash::new()
 );
-define_collection_accessors!(get_or_create_set, get_existing_set, Set, Set, Set::new());
+define_collection_accessors!(get_or_create_set, read_set, write_set, Set, Set, Set::new());
 define_collection_accessors!(
     get_or_create_zset,
-    get_existing_zset,
+    read_zset,
+    write_zset,
     Zset,
     Zset,
     Zset::new()

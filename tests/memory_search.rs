@@ -24,11 +24,23 @@ fn ids(reply: &Value) -> Vec<String> {
 fn corpus(client: &mut KlyroClient) {
     assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
     for (id, text, kind) in [
-        ("m1", "User prefers PostgreSQL for backend projects.", "preference"),
-        ("m2", "User is currently building a database administration tool.", "project"),
+        (
+            "m1",
+            "User prefers PostgreSQL for backend projects.",
+            "preference",
+        ),
+        (
+            "m2",
+            "User is currently building a database administration tool.",
+            "project",
+        ),
         ("m3", "User likes modern developer tools.", "preference"),
         ("m4", "User previously worked with MySQL.", "fact"),
-        ("m5", "User is building Basora, a PostgreSQL developer application.", "project"),
+        (
+            "m5",
+            "User is building Basora, a PostgreSQL developer application.",
+            "project",
+        ),
     ] {
         client.call(&[
             "MEM.ADD", "ns", "ID", id, "TEXT", text, "META", "type", kind,
@@ -68,7 +80,10 @@ fn a_multi_word_query_unions_its_terms_and_ranks_by_overlap() {
     // The whole query is one argument: RESP length-prefixes it, so a
     // multi-word query never has to be quoted or escaped.
     let ranked = ids(&client.call(&["MEM.SEARCH", "ns", "building developer"]));
-    assert_eq!(ranked[0], "m5", "the record matching both terms ranks first");
+    assert_eq!(
+        ranked[0], "m5",
+        "the record matching both terms ranks first"
+    );
     assert!(ranked.len() > 1);
 }
 
@@ -99,8 +114,22 @@ fn identifiers_survive_tokenization_whole() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
-    client.call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "failed with error MAX_RETRIES on mem_001"]);
-    client.call(&["MEM.ADD", "ns", "ID", "b", "TEXT", "retries are configurable"]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "a",
+        "TEXT",
+        "failed with error MAX_RETRIES on mem_001",
+    ]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "b",
+        "TEXT",
+        "retries are configurable",
+    ]);
     assert_eq!(ids(&client.send("MEM.SEARCH ns mem_001")), vec!["a"]);
     assert_eq!(ids(&client.send("MEM.SEARCH ns MAX_RETRIES")), vec!["a"]);
 }
@@ -129,9 +158,9 @@ fn filters_narrow_a_result_set_by_metadata() {
         vec!["m5"]
     );
     // Clauses are ANDed, so an impossible pair returns nothing.
-    assert!(ids(&client.send(
-        "MEM.SEARCH ns PostgreSQL FILTER type EQ preference FILTER type EQ project"
-    ))
+    assert!(ids(
+        &client.send("MEM.SEARCH ns PostgreSQL FILTER type EQ preference FILTER type EQ project")
+    )
     .is_empty());
 }
 
@@ -140,8 +169,26 @@ fn filters_reach_the_record_itself_through_an_at_prefix() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
-    client.call(&["MEM.ADD", "ns", "ID", "high", "TEXT", "database tuning", "IMPORTANCE", "0.9"]);
-    client.call(&["MEM.ADD", "ns", "ID", "low", "TEXT", "database trivia", "IMPORTANCE", "0.1"]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "high",
+        "TEXT",
+        "database tuning",
+        "IMPORTANCE",
+        "0.9",
+    ]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "low",
+        "TEXT",
+        "database trivia",
+        "IMPORTANCE",
+        "0.1",
+    ]);
     assert_eq!(
         ids(&client.send("MEM.SEARCH ns database FILTER @importance GTE 0.5")),
         vec!["high"]
@@ -161,11 +208,37 @@ fn numeric_metadata_compares_as_numbers_not_as_text() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
-    client.call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "shared term", "META", "rank", "42"]);
-    client.call(&["MEM.ADD", "ns", "ID", "b", "TEXT", "shared term", "META", "rank", "100"]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "a",
+        "TEXT",
+        "shared term",
+        "META",
+        "rank",
+        "42",
+    ]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "b",
+        "TEXT",
+        "shared term",
+        "META",
+        "rank",
+        "100",
+    ]);
     // As text "42" sorts after "100"; as numbers it does not.
-    assert_eq!(ids(&client.send("MEM.SEARCH ns shared FILTER rank GT 50")), vec!["b"]);
-    assert_eq!(ids(&client.send("MEM.SEARCH ns shared FILTER rank LT 50")), vec!["a"]);
+    assert_eq!(
+        ids(&client.send("MEM.SEARCH ns shared FILTER rank GT 50")),
+        vec!["b"]
+    );
+    assert_eq!(
+        ids(&client.send("MEM.SEARCH ns shared FILTER rank LT 50")),
+        vec!["a"]
+    );
 }
 
 #[test]
@@ -173,7 +246,16 @@ fn an_expired_record_leaves_the_results_immediately() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
-    client.call(&["MEM.ADD", "ns", "ID", "a", "TEXT", "ephemeral note", "TTL", "1"]);
+    client.call(&[
+        "MEM.ADD",
+        "ns",
+        "ID",
+        "a",
+        "TEXT",
+        "ephemeral note",
+        "TTL",
+        "1",
+    ]);
     client.call(&["MEM.ADD", "ns", "ID", "b", "TEXT", "ephemeral fact"]);
     assert_eq!(ids(&client.send("MEM.SEARCH ns ephemeral")).len(), 2);
     std::thread::sleep(std::time::Duration::from_millis(1100));

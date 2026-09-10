@@ -303,10 +303,7 @@ fn record_reply(memory: &Memory, record: &MemoryRecord, returns: Returns) -> Rep
     if !returns.no_text {
         fields.push((Reply::bulk("text"), Reply::bulk(record.text.clone())));
     }
-    fields.push((
-        Reply::bulk("importance"),
-        double(record.importance),
-    ));
+    fields.push((Reply::bulk("importance"), double(record.importance)));
     fields.push((
         Reply::bulk("created_at"),
         Reply::Integer(unix_millis(record.created_at)),
@@ -456,22 +453,10 @@ fn info(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
         (
             Reply::bulk("weights"),
             Reply::Map(vec![
-                (
-                    Reply::bulk("keyword"),
-                    double(config.weights.keyword),
-                ),
-                (
-                    Reply::bulk("vector"),
-                    double(config.weights.vector),
-                ),
-                (
-                    Reply::bulk("recency"),
-                    double(config.weights.recency),
-                ),
-                (
-                    Reply::bulk("importance"),
-                    double(config.weights.importance),
-                ),
+                (Reply::bulk("keyword"), double(config.weights.keyword)),
+                (Reply::bulk("vector"), double(config.weights.vector)),
+                (Reply::bulk("recency"), double(config.weights.recency)),
+                (Reply::bulk("importance"), double(config.weights.importance)),
             ]),
         ),
         (
@@ -487,10 +472,7 @@ fn info(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
             Reply::bulk("terms"),
             Reply::Integer(memory.term_count() as i64),
         ),
-        (
-            Reply::bulk("avg_doc_len"),
-            double(memory.avg_doc_len()),
-        ),
+        (Reply::bulk("avg_doc_len"), double(memory.avg_doc_len())),
         (
             Reply::bulk("bytes"),
             Reply::Integer(memory.heap_bytes() as i64),
@@ -542,7 +524,7 @@ fn config(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     if let Some(half_life) = half_life {
         memory.set_half_life(half_life);
     }
-    app.store.mark_dirty();
+    app.store.mark_dirty(&argv[1]);
     Ok(Reply::ok())
 }
 
@@ -605,14 +587,11 @@ fn add(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
         return Err(Reply::error("ERR NX and XX are mutually exclusive"));
     }
 
-    let (max_terms, max_records) = (
-        app.config.mem_max_terms_per_doc,
-        app.config.mem_max_records,
-    );
+    let (max_terms, max_records) = (app.config.mem_max_terms_per_doc, app.config.mem_max_records);
     let memory = index(app, &argv[1])?;
     match memory.add(request, max_terms, max_records) {
         Ok(id) => {
-            app.store.mark_dirty();
+            app.store.mark_dirty(&argv[1]);
             Ok(Reply::Bulk(id))
         }
         Err(e) => Err(describe(e)),
@@ -631,7 +610,10 @@ fn get(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
     };
 
     let mut returns = Returns::default();
-    let mut args = Args { argv, at: flag_start };
+    let mut args = Args {
+        argv,
+        at: flag_start,
+    };
     while !args.done() {
         if !returns.read(&mut args) {
             return Err(args.unexpected());
@@ -658,8 +640,11 @@ fn del(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     min_args(argv, "MEM.DEL", 2)?;
     let max_terms = app.config.mem_max_terms_per_doc;
     let memory = index(app, &argv[1])?;
-    let removed = argv[2..].iter().filter(|id| memory.del(id, max_terms)).count();
-    app.store.mark_dirty();
+    let removed = argv[2..]
+        .iter()
+        .filter(|id| memory.del(id, max_terms))
+        .count();
+    app.store.mark_dirty(&argv[1]);
     Ok(Reply::Integer(removed as i64))
 }
 
@@ -675,7 +660,7 @@ fn set_meta(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.set_meta(&argv[2], pairs) {
         Ok(added) => {
-            app.store.mark_dirty();
+            app.store.mark_dirty(&argv[1]);
             Ok(Reply::Integer(added as i64))
         }
         Err(e) => Err(describe(e)),
@@ -688,7 +673,7 @@ fn del_meta(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.remove_meta(&argv[2], &fields) {
         Ok(removed) => {
-            app.store.mark_dirty();
+            app.store.mark_dirty(&argv[1]);
             Ok(Reply::Integer(removed as i64))
         }
         Err(e) => Err(describe(e)),
@@ -707,7 +692,7 @@ fn expire(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.set_record_ttl(&argv[2], ttl) {
         Ok(()) => {
-            app.store.mark_dirty();
+            app.store.mark_dirty(&argv[1]);
             Ok(Reply::bool(true))
         }
         Err(MemoryError::NoSuchRecord) => Ok(Reply::bool(false)),
