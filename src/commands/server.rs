@@ -20,6 +20,7 @@ const SECTIONS: &[&str] = &[
     "persistence",
     "stats",
     "keyspace",
+    "memorydb",
 ];
 
 pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
@@ -210,6 +211,28 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("keyspace_hits", app.stats.keyspace_hits);
             line!("keyspace_misses", app.stats.keyspace_misses);
             line!("expired_keys", app.store.expired_count());
+        }
+
+        // Named apart from "memory", which reports the allocator's view
+        // of the whole process rather than anything about memory
+        // indexes.
+        "memorydb" => {
+            let keys = app.store.memory_keys();
+            let (mut records, mut vectors, mut terms, mut bytes) = (0, 0, 0, 0);
+            for key in &keys {
+                if let Some(memory) = app.store.get_existing_memory(key) {
+                    records += memory.len();
+                    vectors += memory.vector_count();
+                    terms += memory.term_count();
+                    bytes += memory.heap_bytes();
+                }
+            }
+            line!("memory_indexes", keys.len());
+            line!("memory_records", records);
+            line!("memory_vectors", vectors);
+            line!("memory_terms", terms);
+            line!("memory_index_bytes", bytes);
+            line!("memory_records_expired", app.stats.memory_records_expired);
         }
 
         "keyspace" => {

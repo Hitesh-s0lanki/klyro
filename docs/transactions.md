@@ -160,6 +160,19 @@ and duplicating it into one would create something that drifts.
 **`UNWATCH` inside `MULTI` is queued**, as it is in Redis, and running
 it inside `EXEC` is a no-op because `EXEC` clears the watches anyway.
 
+## The memory type
+
+The `MEM.*` family reaches the store through its own accessor rather
+than the `read_*`/`write_*` pair, because a memory index is one value
+whose commands mutate it in place. It reports changes explicitly with
+`Store::mark_dirty(key)`, which moves the watch stamp exactly as
+`write_*` does, so `WATCH ns` breaks on `MEM.ADD` and survives
+`MEM.GET`.
+
+`MEM.*` commands are routed by prefix rather than being listed by name,
+so the queue-time check recognises the prefix too - otherwise a memory
+command would be refused inside `MULTI` while working fine outside it.
+
 ## What is still missing
 
 No `WAIT`, no `CLIENT NO-EVICT`/`CLIENT UNPAUSE`, and no scripting - a

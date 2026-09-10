@@ -16,6 +16,9 @@ pub struct Stats {
     /// means the same thing it does in Redis.
     pub keyspace_hits: u64,
     pub keyspace_misses: u64,
+    /// Memory records dropped because their own TTL passed - the
+    /// per-record counterpart to the keyspace's expired-key count.
+    pub memory_records_expired: u64,
     pub last_save_at: Option<SystemTime>,
     pub last_save_ok: bool,
     pub save_count: u64,
@@ -31,6 +34,7 @@ impl Stats {
             total_commands: 0,
             keyspace_hits: 0,
             keyspace_misses: 0,
+            memory_records_expired: 0,
             last_save_at: None,
             last_save_ok: true,
             save_count: 0,

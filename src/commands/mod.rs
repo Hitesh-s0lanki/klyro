@@ -9,6 +9,7 @@
 mod generic;
 mod hash;
 mod list;
+mod memory;
 mod server;
 mod set;
 mod string;
@@ -137,6 +138,14 @@ const READ_COMMANDS: &[&str] = &[
     "ZREVRANGEBYSCORE",
     "ZRANK",
     "ZREVRANK",
+    "MEM.GET",
+    "MEM.MGET",
+    "MEM.CARD",
+    "MEM.INFO",
+    "MEM.SEARCH",
+    "MEM.VSEARCH",
+    "MEM.QUERY",
+    "MEM.SCAN",
 ];
 
 /// Executes one already-parsed command, or queues it if the session has
@@ -336,7 +345,10 @@ pub(crate) const COMMANDS: &[&str] = &[
 ];
 
 fn is_known_command(name: &str) -> bool {
-    COMMANDS.contains(&name)
+    // The MEM.* family is routed by prefix rather than listed, so it is
+    // recognised the same way here. Without this a transaction would
+    // refuse to queue a memory command that works fine outside one.
+    COMMANDS.contains(&name) || name.starts_with("MEM.")
 }
 
 fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
@@ -382,6 +394,14 @@ fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
         | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "ZPOPMIN" | "ZPOPMAX" => {
             Response::new(zset::dispatch(app, name, argv))
         }
+
+        // --- memory index commands ---
+        // Matched by prefix rather than by listing each verb, so the
+        // family can grow without the router growing with it. An
+        // unknown verb is answered by the handler, which can say which
+        // command was meant instead of falling through to the generic
+        // "unknown command".
+        _ if name.starts_with("MEM.") => Response::new(memory::dispatch(app, name, argv)),
 
         _ => Response::new(unknown_command(argv)),
     }

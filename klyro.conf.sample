@@ -67,3 +67,40 @@ scan-default-count 10
 
 # Most score/member pairs one ZADD may carry.
 zadd-max-pairs 128
+
+# ----- memory indexes -----------------------------------------------
+
+# Ceiling on a memory query's TOPK.
+mem-max-topk 100
+
+# How many candidates each index contributes before fusion. Above
+# mem-max-topk on purpose: fusion can only reorder what it is given, so
+# a candidate set no larger than the answer would make the weights
+# meaningless.
+mem-max-candidates 500
+
+# Ceiling on vector comparisons in one query. Klyro is single-threaded,
+# so an unbounded brute-force scan stalls every other client; past this
+# the query is refused rather than silently answered from part of the
+# index.
+mem-max-scan 1000000
+
+# Widest embedding a memory index may be created with. BGE-small is
+# 384; the larger open models run to 1024 or 1536.
+mem-max-dim 4096
+
+# Ceiling on one memory record's text.
+mem-max-text-bytes 65536
+
+# Records per memory index. 0 means no limit - the one parameter here
+# where 0 is a setting rather than a mistake.
+mem-max-records 0
+
+# Tokenizer cap, so one enormous document cannot dominate the keyword
+# index.
+mem-max-terms-per-doc 1024
+
+# Default recency half-life for a new index, in seconds. A memory loses
+# half its recency score every half-life. MEM.CREATE ... HALFLIFE and
+# MEM.CONFIG ... HALFLIFE override it per index.
+mem-recency-halflife 604800

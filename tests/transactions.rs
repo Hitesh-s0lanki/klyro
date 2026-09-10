@@ -351,6 +351,58 @@ fn reset_clears_the_transaction_and_the_watches() {
 }
 
 #[test]
+fn watch_notices_a_write_to_a_memory_index() {
+    // The memory type reaches the store through its own accessor, so it
+    // reports changes explicitly rather than through `write_*`. This
+    // pins that it still moves the watch stamp.
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    let mut other = server.connect();
+
+    client.send("MEM.CREATE ns MODE SEARCH");
+    client.send("WATCH ns");
+    other.call(&["MEM.ADD", "ns", "ID", "d1", "TEXT", "hello world"]);
+    client.send("MULTI");
+    client.send("PING");
+    assert_eq!(client.send("EXEC"), Value::NilArray);
+}
+
+#[test]
+fn reading_a_memory_index_does_not_break_a_watch() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    let mut other = server.connect();
+
+    client.send("MEM.CREATE ns MODE SEARCH");
+    client.call(&["MEM.ADD", "ns", "ID", "d1", "TEXT", "hello world"]);
+    client.send("WATCH ns");
+    other.send("MEM.GET ns d1");
+    other.send("MEM.CARD ns");
+    client.send("MULTI");
+    client.send("PING");
+    assert_eq!(
+        client.send("EXEC"),
+        Value::Array(vec![Value::Simple("PONG".into())])
+    );
+}
+
+#[test]
+fn a_memory_command_can_be_queued_in_a_transaction() {
+    // MEM.* is routed by prefix rather than listed, so the queue-time
+    // "is this a command" check has to know about the prefix too.
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("MEM.CREATE ns MODE SEARCH");
+    client.send("MULTI");
+    assert_eq!(
+        client.call(&["MEM.ADD", "ns", "ID", "d1", "TEXT", "hello"]),
+        queued()
+    );
+    assert_eq!(client.send("EXEC").items().len(), 1);
+    assert_eq!(client.send("MEM.CARD ns"), int(1));
+}
+
+#[test]
 fn transaction_control_commands_are_never_queued() {
     let server = KlyroServer::new();
     let mut client = server.connect();

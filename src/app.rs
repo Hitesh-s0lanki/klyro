@@ -42,6 +42,7 @@ impl App {
         };
         if should_sweep {
             self.store.sweep_expired();
+            self.sweep_memory_records();
             self.last_sweep = Some(now);
         }
 
@@ -50,6 +51,25 @@ impl App {
             .autosave_due(self.config.save_interval, &self.store)
         {
             self.save();
+        }
+    }
+
+    /// Drops memory records whose own TTL has passed.
+    ///
+    /// A record's deadline is independent of the one on the key holding
+    /// its index, so the keyspace sweep never sees it. Reads already
+    /// hide an expired record, which makes this a memory-reclaiming
+    /// pass rather than a correctness-preserving one.
+    fn sweep_memory_records(&mut self) {
+        for key in self.store.memory_keys() {
+            let Some(memory) = self.store.get_existing_memory(&key) else {
+                continue;
+            };
+            let dropped = memory.sweep_expired(self.config.mem_max_terms_per_doc);
+            if dropped > 0 {
+                self.stats.memory_records_expired += dropped as u64;
+                self.store.mark_dirty(&key);
+            }
         }
     }
 

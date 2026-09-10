@@ -3,7 +3,11 @@
 **The high-performance in-memory data server.**
 
 An in-memory, Redis-style data server in Rust, with String, List, Hash,
-Set, and Sorted Set data types.
+Set, and Sorted Set data types - plus **Memory**, a retrieval structure
+for AI agents that indexes text and embeddings together and ranks by
+keyword relevance, semantic similarity, recency, and importance in one
+query. See [the memory commands](#memory-indexes) and
+[docs/memory-structures.md](docs/memory-structures.md).
 
 **It speaks RESP, so any Redis client library works** - redis-py,
 go-redis, ioredis, and `redis-cli` all connect with no adapter. Values
@@ -32,8 +36,9 @@ matching, the store, persistence round-trips) plus the integration suite
 under [tests/](tests/): spawns real `klyro` server subprocesses, talks
 RESP to them over a real socket, and checks every command's reply type,
 WRONGTYPE errors, binary-safe values, pipelining, protocol errors,
-`KEYS`/`SCAN` pattern matching, and a full persistence round-trip (save,
-kill, reload). 248 tests in all. `cargo test` builds first, so a plain
+`KEYS`/`SCAN` pattern matching, memory index retrieval and ranking, and
+a full persistence round-trip (save, kill, reload). 382 tests in all.
+`cargo test` builds first, so a plain
 `cargo test` from a clean checkout is enough.
 
 Compatibility with real client libraries is verified separately, by
@@ -159,9 +164,10 @@ Node.js examples and the list of clients verified against Klyro.
 
 ## Commands
 
-117 commands. Reply types match Redis's, which is what lets stock client
-libraries decode them; the tables below name the type rather than the
-literal bytes.
+132 commands: 117 Redis-shaped ones, plus the 15 `MEM.*` commands that
+have no Redis equivalent. Reply types match Redis's, which is what lets
+stock client libraries decode them; the tables below name the type
+rather than the literal bytes.
 
 ### Generic (any type)
 
@@ -335,6 +341,84 @@ is empty deletes the destination.
 Score bounds accept a plain number, `-inf`/`+inf`, or a `(` prefix for
 an exclusive bound (`ZCOUNT board (75 +inf`).
 
+### Memory indexes
+
+A memory index is a key like any other: `TYPE` answers `memory`, and
+`DEL`, `EXPIRE`, `RENAME`, `COPY`, `KEYS`, `SCAN`, and `DBSIZE` all
+work on it. The dotted prefix follows the convention Redis modules use,
+so any client reaches these through the "send this command" call it
+already has.
+
+One key holds one index; one index holds many records. `MODE` picks
+which of the three retrieval structures it is:
+
+| Mode | Keyword | Semantic | Needs embeddings |
+|---|---|---|---|
+| `SEARCH` | yes | no | no |
+| `VECTOR` | no | yes | yes |
+| `HYBRID` (default) | yes | yes | yes |
+
+| Command | Reply |
+|---|---|
+| `MEM.CREATE key [MODE SEARCH\|VECTOR\|HYBRID] [DIM n] [METRIC COSINE\|L2\|IP] [WEIGHTS kw vec rec imp] [HALFLIFE seconds]` | `OK`, or an error if the key exists |
+| `MEM.INFO key` | map: mode, dim, metric, weights, halflife, records, vectors, terms, avg_doc_len, bytes |
+| `MEM.CONFIG key [WEIGHTS kw vec rec imp] [HALFLIFE seconds]` | `OK` |
+| `MEM.CARD key` | the live record count |
+| `MEM.ADD key [ID id] TEXT text [VEC blob \| FVEC n f1..fn] [META field value]... [IMPORTANCE x] [TTL seconds] [NX\|XX]` | the record id |
+| `MEM.GET key id [NOTEXT] [WITHMETA] [WITHVEC]` | the record as a map, or nil |
+| `MEM.MGET key id [id ...]` | array of records, nil per missing id |
+| `MEM.DEL key id [id ...]` | number removed |
+| `MEM.SETMETA key id field value [field value ...]` | number of fields newly set |
+| `MEM.DELMETA key id field [field ...]` | number removed |
+| `MEM.EXPIRE key id seconds` | 1 if set (0 seconds clears the deadline) |
+| `MEM.SCAN key cursor [COUNT n] [FILTER ...]` | `[next cursor, ids]` |
+| `MEM.SEARCH key query [TOPK k] [FILTER ...] [<flags>]` | ranked hits, keyword only |
+| `MEM.VSEARCH key (VEC blob \| FVEC n f1..fn) [TOPK k] [FILTER ...] [<flags>]` | ranked hits, semantic only |
+| `MEM.QUERY key [TEXT query] [VEC blob \| FVEC n f1..fn] [TOPK k] [WEIGHTS ...] [FUSION LINEAR\|RRF] [FILTER ...] [<flags>]` | ranked hits, fused |
+
+`MEM.QUERY` is the one to reach for. Given only `TEXT` it runs a
+keyword search, given only a vector a semantic one, and given both it
+fuses the two rankings.
+
+**Vectors.** `VEC` takes raw little-endian float32 bytes - four bytes
+per dimension, and exactly what `struct.pack` or a `Float32Array`
+already holds. `FVEC` spells the same vector as decimal words, so a
+query can be typed into `redis-cli`. Klyro does not embed text for you:
+the client sends the vector it got from whichever model it uses.
+
+**Filters** are repeated `FILTER field op value` triples, ANDed, with
+`EQ NE GT GTE LT LTE IN CONTAINS`. A field beginning with `@` reads the
+record itself rather than its metadata: `@id`, `@text`, `@importance`,
+`@created_at`, `@updated_at`. Values that parse as numbers compare
+numerically, so `FILTER @importance GTE 0.8` and `FILTER type EQ
+preference` both work without declaring a schema. Filters run before
+scoring, which is what keeps a query off the whole namespace.
+
+**Return flags** are `NOTEXT`, `WITHMETA`, `WITHVEC`, and `WITHSCORES`.
+The last breaks a fused score into the parts that produced it.
+
+**Scoring.** Keyword relevance is BM25. Semantic similarity is the
+index's metric. A fused score is
+
+```text
+score = w_keyword·keyword + w_vector·vector + w_recency·recency + w_importance·importance
+```
+
+with the components rescaled onto a common range first, since BM25 is
+unbounded and cosine is not. Recency halves every `HALFLIFE`. Weights
+default to `0.35 0.50 0.10 0.05` and are settable per index or per
+query. `FUSION RRF` ranks by position instead, which is steadier when
+one index scored everything nearly the same.
+
+```sh
+MEM.CREATE user:123 MODE HYBRID DIM 384
+MEM.ADD user:123 TEXT "User prefers PostgreSQL for backend projects." VEC <384 floats> META type preference IMPORTANCE 0.85
+MEM.QUERY user:123 TEXT "What database does the user prefer?" VEC <384 floats> TOPK 5 FILTER type EQ preference
+```
+
+Records carry their own TTL, separate from the key's, so a session
+memory can expire without the index going with it.
+
 ### Rules that apply everywhere
 
 A command against a key holding a different type replies
@@ -343,7 +427,8 @@ removing the last element of a collection deletes the key, same as
 Redis.
 
 Keys, values, fields, and members are arbitrary bytes: they may contain
-spaces, newlines, and NUL bytes.
+spaces, newlines, and NUL bytes. So are a memory record's text and
+metadata.
 
 ## Project layout
 
@@ -364,6 +449,7 @@ src/
     hash.rs      -   HSET/HMSET/HMGET/HINCRBY/HKEYS/...
     set.rs       -   membership plus the SINTER/SUNION/SDIFF algebra
     zset.rs      -   ranks, score-range queries, ZINCRBY, the pops
+    memory.rs    -   the MEM.* family: CRUD, SEARCH/VSEARCH/QUERY
     server.rs    -   PING/ECHO/HELLO/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
     transaction.rs - MULTI/EXEC/DISCARD/WATCH/UNWATCH/RESET
   session.rs     - per-connection state: protocol, open transaction, watched keys
@@ -375,6 +461,13 @@ src/
     hash.rs      -   Hash (a HashMap<Bytes, Bytes> alias)
     set.rs       -   Set (a HashSet<Bytes> alias)
     zset.rs      -   Sorted Set (members ordered by (score, member))
+    memory/      -   Memory: agent retrieval over text + embeddings
+      mod.rs     -     the index: config, records, both sub-indexes
+      record.rs  -     one stored memory and its metadata
+      text.rs    -     tokenizer, inverted index, BM25
+      vector.rs  -     contiguous vector store, cosine/L2/inner product
+      filter.rs  -     metadata filters (field op value, ANDed)
+      fuse.rs    -     score normalization, recency, LINEAR and RRF
   util/          - generic infrastructure with no keyspace/protocol knowledge
     bytes.rs     -   the Bytes alias plus byte parsing/formatting helpers
     glob.rs      -   glob pattern matching (used by KEYS/SCAN)
@@ -390,6 +483,11 @@ tests/           - the integration suite (see "Test" above)
   common/mod.rs  -  starts/stops a klyro subprocess, speaks RESP to it
   protocol.rs    -  reply types, binary values, inline commands, pipelining
   generic.rs     -  PING/DEL/TYPE/KEYS/DBSIZE/SAVE/SHUTDOWN, WRONGTYPE
+  memory.rs      -  memory index CRUD, TTL, scanning, keyspace interop
+  memory_search.rs      -  BM25 ranking, filters, return flags
+  memory_vector.rs      -  the three metrics, the scan ceiling
+  memory_hybrid.rs      -  fusion, weights, LINEAR vs RRF
+  memory_persistence.rs -  a memory index across a restart
   keyspace.rs    -  EXISTS/RENAME/COPY/RANDOMKEY/FLUSHDB
   expiry.rs      -  EXPIRE/PEXPIRE/EXPIREAT/PTTL/PERSIST
   strings.rs     -  SET option flags, SETNX/SETEX/GETSET/MGET/INCRBY
@@ -439,14 +537,18 @@ tests.
 ## Persistence format
 
 The dump file is length-prefixed, because a value may contain a newline:
-a `KLYRO-DUMP 2` header, then one record per key giving its type and
+a `KLYRO-DUMP 3` header, then one record per key giving its type and
 absolute expiry, then each blob as its length followed by exactly that
 many bytes. Saves are atomic (written to `<path>.tmp`, then renamed over
 the real path), so a crash mid-save can't corrupt the existing dump.
 
-Version 1 dumps - the original whitespace-delimited text format - still
-load, so an existing dump survives the upgrade. They are rewritten as
-version 2 on the next save. See
+A memory index writes its configuration and its records, never its
+inverted index or its vector array: both are derivable, and are rebuilt
+on load. That keeps the dump small and leaves one format to maintain
+rather than two.
+
+Version 1 and 2 dumps still load, so an existing dump survives the
+upgrade. They are rewritten as version 3 on the next save. See
 [docs/resp-protocol.md](docs/resp-protocol.md).
 
 ## Known limitations
@@ -457,8 +559,13 @@ comparison against Redis. The ones worth knowing before you use this:
 - No pub/sub, scripting (`EVAL`), or blocking commands (`BLPOP`), so no
   queues and no server-side scripting. `MULTI`/`EXEC` with `WATCH` does
   cover atomic read-modify-write.
-- Only the 117 commands listed above. A client library will happily
+- Only the 132 commands listed above. A client library will happily
   call anything else and get back `ERR unknown command`.
+- Memory indexes do not embed text: the client supplies the vector.
+  Vector search is an exact brute-force scan, capped by `mem-max-scan`
+  because the server is single-threaded and an unbounded scan would
+  stall every other client. Both are addressed in
+  [docs/memory-structures.md](docs/memory-structures.md).
 - No `maxmemory` or eviction policy: the dataset grows until the process
   runs out of memory. `INFO memory` reports how much is in use, but
   nothing acts on it.
