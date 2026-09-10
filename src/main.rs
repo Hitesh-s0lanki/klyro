@@ -86,7 +86,8 @@ fn main() -> ExitCode {
     println!("{} {} - {}", KLYRO_NAME, KLYRO_VERSION, KLYRO_TAGLINE);
 
     let mut app = app::App::new(config);
-    app.persist.load(&mut app.store);
+    let max_terms = app.config.mem_max_terms_per_doc;
+    app.persist.load(&mut app.store, max_terms);
 
     if let Err(e) = server::run(&mut app) {
         eprintln!("error: {}", e);

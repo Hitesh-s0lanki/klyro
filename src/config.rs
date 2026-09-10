@@ -59,6 +59,31 @@ pub struct Config {
     pub scan_default_count: usize,
     /// Ceiling on score/member pairs in a single ZADD.
     pub zadd_max_pairs: usize,
+
+    // --- memory indexes ---
+    /// Ceiling on a memory query's TOPK.
+    pub mem_max_topk: usize,
+    /// How many candidates each index contributes before fusion. Above
+    /// TOPK on purpose: fusion can only reorder what it is given, so a
+    /// candidate set no larger than the answer would make the weights
+    /// meaningless.
+    pub mem_max_candidates: usize,
+    /// Ceiling on vector comparisons in one query. Klyro is
+    /// single-threaded, so an unbounded brute-force scan stalls every
+    /// other client; past this the query is refused rather than
+    /// silently answered from part of the index.
+    pub mem_max_scan: usize,
+    /// Widest embedding a memory index may be created with.
+    pub mem_max_dim: usize,
+    /// Ceiling on one record's text.
+    pub mem_max_text_bytes: usize,
+    /// Records per memory index, or 0 for unlimited.
+    pub mem_max_records: usize,
+    /// Tokenizer cap, so one enormous document cannot dominate the
+    /// keyword index.
+    pub mem_max_terms_per_doc: usize,
+    /// Default recency half-life for a new index, in seconds.
+    pub mem_recency_halflife: u64,
 }
 
 impl Default for Config {
@@ -75,6 +100,14 @@ impl Default for Config {
             client_output_buffer_limit: 256 * 1024 * 1024,
             scan_default_count: 10,
             zadd_max_pairs: 128,
+            mem_max_topk: 100,
+            mem_max_candidates: 500,
+            mem_max_scan: 1_000_000,
+            mem_max_dim: 4096,
+            mem_max_text_bytes: 65_536,
+            mem_max_records: 0,
+            mem_max_terms_per_doc: 1024,
+            mem_recency_halflife: 7 * 24 * 3600,
         }
     }
 }
@@ -92,15 +125,29 @@ pub const PARAMETERS: &[&str] = &[
     "client-output-buffer-limit",
     "scan-default-count",
     "zadd-max-pairs",
+    "mem-max-topk",
+    "mem-max-candidates",
+    "mem-max-scan",
+    "mem-max-dim",
+    "mem-max-text-bytes",
+    "mem-max-records",
+    "mem-max-terms-per-doc",
+    "mem-recency-halflife",
 ];
 
-/// Parses a positive integer, rejecting zero - every numeric parameter
-/// here is a size or an interval, and none of them is meaningful at 0.
+/// Parses a positive integer, rejecting zero - most numeric parameters
+/// here are a size or an interval, and none of those is meaningful at 0.
 fn positive(value: &str) -> Result<u64, SetError> {
     match value.parse::<u64>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(SetError::BadValue),
     }
+}
+
+/// The same, for the parameters where 0 is a real setting meaning
+/// "no limit" rather than a mistake.
+fn non_negative(value: &str) -> Result<u64, SetError> {
+    value.parse::<u64>().map_err(|_| SetError::BadValue)
 }
 
 impl Config {
@@ -119,6 +166,14 @@ impl Config {
             "client-output-buffer-limit" => self.client_output_buffer_limit.to_string(),
             "scan-default-count" => self.scan_default_count.to_string(),
             "zadd-max-pairs" => self.zadd_max_pairs.to_string(),
+            "mem-max-topk" => self.mem_max_topk.to_string(),
+            "mem-max-candidates" => self.mem_max_candidates.to_string(),
+            "mem-max-scan" => self.mem_max_scan.to_string(),
+            "mem-max-dim" => self.mem_max_dim.to_string(),
+            "mem-max-text-bytes" => self.mem_max_text_bytes.to_string(),
+            "mem-max-records" => self.mem_max_records.to_string(),
+            "mem-max-terms-per-doc" => self.mem_max_terms_per_doc.to_string(),
+            "mem-recency-halflife" => self.mem_recency_halflife.to_string(),
             _ => return None,
         })
     }
@@ -186,6 +241,39 @@ impl Config {
             }
             "zadd-max-pairs" => {
                 self.zadd_max_pairs = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-max-topk" => {
+                self.mem_max_topk = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-max-candidates" => {
+                self.mem_max_candidates = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-max-scan" => {
+                self.mem_max_scan = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-max-dim" => {
+                self.mem_max_dim = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-max-text-bytes" => {
+                self.mem_max_text_bytes = positive(value)? as usize;
+                Ok(())
+            }
+            // 0 is "no limit" here, not a typo.
+            "mem-max-records" => {
+                self.mem_max_records = non_negative(value)? as usize;
+                Ok(())
+            }
+            "mem-max-terms-per-doc" => {
+                self.mem_max_terms_per_doc = positive(value)? as usize;
+                Ok(())
+            }
+            "mem-recency-halflife" => {
+                self.mem_recency_halflife = positive(value)?;
                 Ok(())
             }
             _ => Err(SetError::Unknown),

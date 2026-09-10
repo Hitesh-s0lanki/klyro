@@ -19,9 +19,18 @@
 //! per member, and sorted sets a member blob plus a score line.
 //! `<expire-at-ms>` is `-1` for a key with no TTL.
 //!
+//! Version 3 adds the `MEMORY` record for memory indexes. It is
+//! otherwise identical to version 2, so one reader handles both and a
+//! version 2 dump is simply one that happens to contain no memory
+//! index. What a `MEMORY` record stores is the index's configuration
+//! and its records - never its inverted index or its vector array,
+//! both of which are derivable and are rebuilt on load. Serializing
+//! them would roughly double the dump and add a second format to keep
+//! in step with the first.
+//!
 //! Version 1 dumps - the original whitespace-delimited text format -
 //! still load, so an existing dump survives the upgrade. They are
-//! rewritten as version 2 on the next save.
+//! rewritten as the current version on the next save.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
@@ -29,9 +38,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::store::{Store, StoreType};
+use crate::types::memory::record::MemoryRecord;
+use crate::types::memory::vector::{encode_le_f32, parse_le_f32, Metric};
+use crate::types::memory::{from_unix_millis, unix_millis, Memory, MemoryConfig, Mode, Weights};
 use crate::util::bytes::{format_f64, parse_f64, Bytes};
 
-const DUMP_MAGIC: &str = "KLYRO-DUMP 2";
+const DUMP_MAGIC: &str = "KLYRO-DUMP 3";
+/// Version 2 differs only by having no `MEMORY` record, so the same
+/// reader loads it.
+const V2_MAGIC: &str = "KLYRO-DUMP 2";
 const LEGACY_MAGIC: &str = "KLYRO-DUMP 1";
 
 pub struct Persist {
@@ -97,7 +112,11 @@ impl Persist {
 
     /// Loads the dump file at the configured path into `store`, if one
     /// exists. Call once at startup, before accepting connections.
-    pub fn load(&self, store: &mut Store) {
+    ///
+    /// `max_terms` is the tokenizer cap a memory index rebuilds its
+    /// keyword index under, so a dump reloads under the running
+    /// configuration rather than whatever wrote it.
+    pub fn load(&self, store: &mut Store, max_terms: usize) {
         let file = match File::open(&self.path) {
             Ok(f) => f,
             Err(_) => return, // no dump yet; nothing to load
@@ -110,8 +129,8 @@ impl Persist {
             Ok(Some(line)) => line,
             _ => return,
         };
-        let loaded = if magic.starts_with(DUMP_MAGIC) {
-            self.load_v2(&mut reader)
+        let loaded = if magic.starts_with(DUMP_MAGIC) || magic.starts_with(V2_MAGIC) {
+            self.load_v2(&mut reader, max_terms)
         } else if magic.starts_with(LEGACY_MAGIC) {
             self.load_v1(&mut reader)
         } else {
@@ -132,7 +151,11 @@ impl Persist {
         }
     }
 
-    fn load_v2<R: BufRead>(&self, reader: &mut DumpReader<R>) -> io::Result<Vec<LoadedEntry>> {
+    fn load_v2<R: BufRead>(
+        &self,
+        reader: &mut DumpReader<R>,
+        max_terms: usize,
+    ) -> io::Result<Vec<LoadedEntry>> {
         let mut entries = Vec::new();
         while let Some(header) = reader.line()? {
             if header.is_empty() {
@@ -183,6 +206,12 @@ impl Persist {
                     }
                     LoadedValue::Zset(pairs)
                 }
+                "MEMORY" => match read_memory(reader, count, max_terms)? {
+                    Some(memory) => LoadedValue::Memory(Box::new(memory)),
+                    // A truncated record leaves the reader mid-stream,
+                    // so nothing after it can be trusted either.
+                    None => break,
+                },
                 _ => continue,
             };
             entries.push(LoadedEntry {
@@ -346,6 +375,48 @@ impl Persist {
                         }
                     }
                 }
+                StoreType::Memory => {
+                    if let Some(memory) = store.get_existing_memory(&key) {
+                        let records = memory.records_for_dump();
+                        writeln!(f, "MEMORY {} {}", expire_at, records.len())?;
+                        write_blob(&mut f, &key)?;
+                        let config = memory.config();
+                        writeln!(
+                            f,
+                            "{} {} {} {} {} {} {} {} {}",
+                            config.mode.name(),
+                            config.dim,
+                            config.metric.name(),
+                            config.weights.keyword,
+                            config.weights.vector,
+                            config.weights.recency,
+                            config.weights.importance,
+                            config.half_life.as_secs(),
+                            memory.next_id(),
+                        )?;
+                        for (record, vector) in records {
+                            write_blob(&mut f, &record.id)?;
+                            write_blob(&mut f, &record.text)?;
+                            writeln!(
+                                f,
+                                "{} {} {} {} {} {}",
+                                unix_millis(record.created_at),
+                                unix_millis(record.updated_at),
+                                record.importance,
+                                record.expire_at.map_or(-1, unix_millis),
+                                record.meta().len(),
+                                vector.map_or(0, |v| v.len()),
+                            )?;
+                            for (field, value) in record.meta() {
+                                write_blob(&mut f, field)?;
+                                write_blob(&mut f, value)?;
+                            }
+                            if let Some(values) = vector {
+                                write_blob(&mut f, &encode_le_f32(values))?;
+                            }
+                        }
+                    }
+                }
                 StoreType::Zset => {
                     if let Some(zset) = store.get_existing_zset(&key) {
                         let pairs: Vec<(Bytes, f64)> =
@@ -389,12 +460,90 @@ impl Persist {
     }
 }
 
+/// Reads one `MEMORY` record's configuration line and its records.
+/// `None` means the dump ran out mid-record.
+fn read_memory<R: BufRead>(
+    reader: &mut DumpReader<R>,
+    count: usize,
+    max_terms: usize,
+) -> io::Result<Option<Memory>> {
+    let Some(header) = reader.line()? else {
+        return Ok(None);
+    };
+    let fields: Vec<&str> = header.split_whitespace().collect();
+    if fields.len() < 9 {
+        return Ok(None);
+    }
+    let (Some(mode), Some(metric)) = (
+        Mode::parse(fields[0].as_bytes()),
+        Metric::parse(fields[2].as_bytes()),
+    ) else {
+        return Ok(None);
+    };
+    let number = |at: usize| fields[at].parse::<f32>().unwrap_or_default();
+    let mut config = MemoryConfig::new(mode, fields[1].parse().unwrap_or(0), metric);
+    let weights = Weights {
+        keyword: number(3),
+        vector: number(4),
+        recency: number(5),
+        importance: number(6),
+    };
+    if weights.is_valid() {
+        config.weights = weights;
+    }
+    if let Ok(seconds) = fields[7].parse::<u64>() {
+        config.half_life = Duration::from_secs(seconds);
+    }
+
+    let mut memory = Memory::new(config);
+    memory.set_next_id(fields[8].parse().unwrap_or(1));
+
+    for _ in 0..count {
+        let (Some(id), Some(text), Some(line)) = (reader.blob()?, reader.blob()?, reader.line()?)
+        else {
+            return Ok(None);
+        };
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            return Ok(None);
+        }
+        let millis = |at: usize| parts[at].parse::<i64>().unwrap_or(-1);
+        let mut record = MemoryRecord::new(id, text, from_unix_millis(millis(0)));
+        record.updated_at = from_unix_millis(millis(1));
+        record.importance = parts[2].parse().unwrap_or(0.5);
+        record.expire_at = match millis(3) {
+            at if at >= 0 => Some(from_unix_millis(at)),
+            _ => None,
+        };
+        let meta_count: usize = parts[4].parse().unwrap_or(0);
+        let vector_len: usize = parts[5].parse().unwrap_or(0);
+
+        for _ in 0..meta_count {
+            let (Some(field), Some(value)) = (reader.blob()?, reader.blob()?) else {
+                return Ok(None);
+            };
+            record.set_meta(field, value);
+        }
+        let vector = if vector_len > 0 {
+            let Some(blob) = reader.blob()? else {
+                return Ok(None);
+            };
+            parse_le_f32(&blob).ok()
+        } else {
+            None
+        };
+        memory.load_record(record, vector, max_terms);
+    }
+    Ok(Some(memory))
+}
+
 enum LoadedValue {
     Str(Bytes),
     List(Vec<Bytes>),
     Hash(Vec<(Bytes, Bytes)>),
     Set(Vec<Bytes>),
     Zset(Vec<(Bytes, f64)>),
+    Memory(Box<Memory>),
 }
 
 struct LoadedEntry {
@@ -430,6 +579,9 @@ impl LoadedEntry {
                     }
                 }
             }
+            LoadedValue::Memory(memory) => {
+                store.create_memory(&self.key, *memory);
+            }
         }
         if self.expire_at >= 0 {
             let deadline = UNIX_EPOCH + Duration::from_millis(self.expire_at as u64);
@@ -443,6 +595,10 @@ impl LoadedEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tokenizer cap a reload rebuilds a memory index under. Any
+    /// value works here; the tests index a handful of words.
+    const TEST_MAX_TERMS: usize = 1024;
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -489,7 +645,7 @@ mod tests {
         assert!(persist.save_to(path.to_str().unwrap(), &mut store));
 
         let mut reloaded = Store::new();
-        Persist::new(path.to_str().unwrap()).load(&mut reloaded);
+        Persist::new(path.to_str().unwrap()).load(&mut reloaded, TEST_MAX_TERMS);
 
         assert_eq!(
             reloaded.get_string(b"greeting"),
@@ -545,7 +701,7 @@ mod tests {
         assert!(persist.save_to(path.to_str().unwrap(), &mut store));
 
         let mut reloaded = Store::new();
-        Persist::new(path.to_str().unwrap()).load(&mut reloaded);
+        Persist::new(path.to_str().unwrap()).load(&mut reloaded, TEST_MAX_TERMS);
         assert_eq!(reloaded.get_string(&key), Some(value));
         assert_eq!(
             reloaded.get_existing_list(b"l").unwrap().front().unwrap(),
@@ -575,7 +731,7 @@ mod tests {
         .unwrap();
 
         let mut store = Store::new();
-        Persist::new(path.to_str().unwrap()).load(&mut store);
+        Persist::new(path.to_str().unwrap()).load(&mut store, TEST_MAX_TERMS);
 
         assert_eq!(store.get_string(b"greeting"), Some(b"hello there".to_vec()));
         assert_eq!(store.get_existing_list(b"mylist").unwrap().len(), 2);
@@ -614,7 +770,7 @@ mod tests {
         .unwrap();
 
         let mut store = Store::new();
-        Persist::new(path.to_str().unwrap()).load(&mut store);
+        Persist::new(path.to_str().unwrap()).load(&mut store, TEST_MAX_TERMS);
         let ttl = store.ttl(b"k");
         assert!((400..=500).contains(&ttl), "got {ttl}");
         cleanup(&path);
@@ -627,7 +783,7 @@ mod tests {
         fs::write(&path, "this is not a dump\n").unwrap();
 
         let mut store = Store::new();
-        Persist::new(path.to_str().unwrap()).load(&mut store);
+        Persist::new(path.to_str().unwrap()).load(&mut store, TEST_MAX_TERMS);
         assert_eq!(store.size(), 0);
         cleanup(&path);
     }

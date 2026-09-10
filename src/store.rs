@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use crate::types::hash::Hash;
 use crate::types::list::List;
+use crate::types::memory::Memory;
 use crate::types::set::Set;
 use crate::types::zset::Zset;
 use crate::util::bytes::Bytes;
@@ -18,6 +19,7 @@ pub enum StoreType {
     Hash,
     Set,
     Zset,
+    Memory,
 }
 
 impl StoreType {
@@ -30,6 +32,7 @@ impl StoreType {
             StoreType::Hash => "hash",
             StoreType::Set => "set",
             StoreType::Zset => "zset",
+            StoreType::Memory => "memory",
         }
     }
 }
@@ -41,6 +44,7 @@ enum Value {
     Hash(Hash),
     Set(Set),
     Zset(Zset),
+    Memory(Box<Memory>),
 }
 
 impl Value {
@@ -51,15 +55,20 @@ impl Value {
             Value::Hash(_) => StoreType::Hash,
             Value::Set(_) => StoreType::Set,
             Value::Zset(_) => StoreType::Zset,
+            Value::Memory(_) => StoreType::Memory,
         }
     }
 
     /// Whether this value is an empty collection (strings are never
     /// emptied this way - matches Redis's "empty collections don't
     /// exist" for List/Hash/Set/Zset only).
+    ///
+    /// A memory index is never empty in this sense. It carries a mode,
+    /// a dimension, and a metric that took a `MEM.CREATE` to establish,
+    /// so emptying it of records must not silently discard that.
     fn is_empty_collection(&self) -> bool {
         match self {
-            Value::Str(_) => false,
+            Value::Str(_) | Value::Memory(_) => false,
             Value::List(l) => l.is_empty(),
             Value::Hash(h) => h.is_empty(),
             Value::Set(s) => s.is_empty(),
@@ -161,7 +170,7 @@ impl Store {
     /// Live key counts broken down by type, in `StoreType` order.
     pub fn type_breakdown(&self) -> Vec<(StoreType, usize)> {
         let now = SystemTime::now();
-        let mut counts = [0usize; 5];
+        let mut counts = [0usize; 6];
         for entry in self.map.values().filter(|e| Self::is_live(e, now)) {
             counts[entry.value.type_of() as usize] += 1;
         }
@@ -171,6 +180,7 @@ impl Store {
             StoreType::Hash,
             StoreType::Set,
             StoreType::Zset,
+            StoreType::Memory,
         ]
         .into_iter()
         .map(|t| (t, counts[t as usize]))
@@ -429,6 +439,63 @@ impl Store {
             }) => Some(s.clone()),
             _ => None,
         }
+    }
+}
+
+impl Store {
+    /// Marks the keyspace changed, so autosave notices.
+    ///
+    /// Most types record this inside `get_or_create_*`, which is only
+    /// ever called to mutate. A memory index is reached through
+    /// `get_existing_memory`, which cannot tell `MEM.GET` from
+    /// `MEM.ADD`, so its mutating commands say so explicitly rather
+    /// than having every read look like a write.
+    pub fn mark_dirty(&mut self) {
+        self.dirty += 1;
+    }
+
+    /// Installs a new memory index at `key`. Returns `false` without
+    /// touching anything if the key is already taken - `MEM.CREATE`
+    /// never silently replaces an index, because doing so would drop
+    /// every record in it.
+    pub fn create_memory(&mut self, key: &[u8], memory: Memory) -> bool {
+        if self.exists(key) {
+            return false;
+        }
+        self.dirty += 1;
+        self.map.insert(
+            key.to_vec(),
+            Entry {
+                value: Value::Memory(Box::new(memory)),
+                expire_at: None,
+            },
+        );
+        true
+    }
+
+    /// `None` if the key is missing or holds another type. Never
+    /// creates: an index needs a mode and a dimension, which only
+    /// `MEM.CREATE` can supply.
+    pub fn get_existing_memory(&mut self, key: &[u8]) -> Option<&mut Memory> {
+        match self.find_mut(key) {
+            Some(e) => match &mut e.value {
+                Value::Memory(m) => Some(m),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    /// Every live memory index, for the periodic record sweep and for
+    /// INFO's totals. Takes `&mut` because reaching a value means
+    /// walking the same expiry check every lookup does.
+    pub fn memory_keys(&self) -> Vec<Bytes> {
+        let now = SystemTime::now();
+        self.map
+            .iter()
+            .filter(|(_, e)| Self::is_live(e, now) && e.value.type_of() == StoreType::Memory)
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 }
 
