@@ -47,7 +47,9 @@ broken.conf:
 | `save-interval` | `60` | yes | Seconds between autosave checks |
 | `sweep-interval` | `1000` | yes | Milliseconds between active expired-key sweeps |
 | `maxclients` | `10000` | yes | Connection ceiling |
-| `max-string-bytes` | `65536` | yes | Largest value `APPEND`/`SETRANGE` will produce |
+| `max-string-bytes` | `536870912` | yes | Largest value `APPEND`/`SETRANGE` will produce |
+| `proto-max-bulk-len` | `536870912` | yes | Largest bulk string a client may send |
+| `client-output-buffer-limit` | `268435456` | yes | Unsent reply allowed to pile up before the connection is closed |
 | `scan-default-count` | `10` | yes | The `COUNT` a `SCAN` uses when not given one |
 | `zadd-max-pairs` | `128` | yes | Most score/member pairs in one `ZADD` |
 
@@ -58,14 +60,16 @@ bound by the time a client could ask; `CONFIG SET` on either replies
 ## CONFIG
 
 ```
-CONFIG GET *                    every parameter
-CONFIG GET save*                glob-matched, same syntax as KEYS
+CONFIG GET *                        every parameter
+CONFIG GET save*                    glob-matched, same syntax as KEYS
+CONFIG GET maxclients dbfilename    several at once
 CONFIG SET maxclients 128
-CONFIG RESETSTAT                clears INFO's activity counters
+CONFIG RESETSTAT                    clears INFO's activity counters
 ```
 
-`CONFIG GET` replies one `parameter value` line per match, then `END`.
-Parameter names are case-insensitive. A refused `CONFIG SET` says which
+`CONFIG GET` replies with a map of parameter to value, and accepts
+several patterns at once. Parameter names and the subcommand are both
+case-insensitive. A refused `CONFIG SET` says which
 of the three reasons applies: unknown parameter, immutable parameter, or
 invalid value. Every numeric parameter is a size or an interval, so zero
 and negative values are rejected.
@@ -77,12 +81,17 @@ Changes take effect immediately, with one deliberate exception:
 
 `INFO` prints every section; `INFO <section>` prints one. Sections are
 `server`, `clients`, `memory`, `persistence`, `stats`, and `keyspace`,
-plus `all`/`default` as synonyms for everything. The reply is `# Section`
-headers over `key:value` lines, ending with `END`.
+plus `all`/`default` as synonyms for everything. An unknown section
+returns an empty body rather than an error, as Redis does.
+
+The reply is a single bulk string of `# Section` headers over
+`key:value` lines, which is the shape client libraries parse into a
+dictionary - `r.info()` in redis-py returns a dict straight off it.
 
 ```
 # Server
 klyro_version:0.1.0
+redis_version:7.0.0
 process_id:19357
 tcp_bind:0.0.0.0
 tcp_port:7171
@@ -142,6 +151,11 @@ keeps the accounting in one place instead of spread across 107 handlers.
 Internal type checks deliberately use a non-counting lookup, otherwise
 every read would register as two.
 
+**`redis_version` is a compatibility shim.** Client libraries gate
+command availability on it, so INFO reports the Redis release whose
+command shapes Klyro implements. It is not a claim to be that server;
+`klyro_version` sits right above it.
+
 **The keyspace section is the one O(n) part of INFO.** It walks the
 keyspace to count keys, keys with a TTL, and the per-type breakdown.
 Everything else is O(1).
@@ -159,11 +173,15 @@ dropped silently:
 
 ```
 $ nc localhost 7171
-ERR max number of clients reached
+-ERR max number of clients reached
 ```
 
 `INFO clients` counts how often that has happened in
 `rejected_connections`.
+
+`client-output-buffer-limit` is the other one that closes a connection:
+a reply that outgrows it ends the connection with an error, which is
+what replaced the old protocol's silent 64 KiB truncation.
 
 ## What is still missing
 

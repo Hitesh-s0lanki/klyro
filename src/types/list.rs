@@ -5,7 +5,9 @@
 
 use std::collections::VecDeque;
 
-pub type List = VecDeque<String>;
+use crate::util::bytes::Bytes;
+
+pub type List = VecDeque<Bytes>;
 
 /// Resolves an inclusive `[start, stop]` index pair against a
 /// collection of `len` items, translating negative indices (counted from
@@ -42,14 +44,14 @@ pub fn resolve_index(len: usize, index: i64) -> Option<usize> {
 
 /// Values covering the inclusive range `[start, stop]`; negative indices
 /// count from the end, as in Redis's LRANGE.
-pub fn range(list: &List, start: i64, stop: i64) -> Vec<&str> {
+pub fn range(list: &List, start: i64, stop: i64) -> Vec<&[u8]> {
     match resolve_range(list.len(), start, stop) {
         None => Vec::new(),
         Some((start, stop)) => list
             .iter()
             .skip(start)
             .take(stop - start + 1)
-            .map(|s| s.as_str())
+            .map(|v| v.as_slice())
             .collect(),
     }
 }
@@ -70,7 +72,7 @@ pub fn trim(list: &mut List, start: i64, stop: i64) {
 /// `count > 0` removes that many from the head, `count < 0` that many
 /// from the tail, `count == 0` removes every match. Returns how many
 /// were removed.
-pub fn remove(list: &mut List, count: i64, value: &str) -> usize {
+pub fn remove(list: &mut List, count: i64, value: &[u8]) -> usize {
     let limit = if count == 0 {
         usize::MAX
     } else {
@@ -81,7 +83,7 @@ pub fn remove(list: &mut List, count: i64, value: &str) -> usize {
     let mut positions: Vec<usize> = list
         .iter()
         .enumerate()
-        .filter(|(_, v)| v.as_str() == value)
+        .filter(|(_, v)| v.as_slice() == value)
         .map(|(i, _)| i)
         .collect();
     if from_tail {
@@ -99,10 +101,10 @@ pub fn remove(list: &mut List, count: i64, value: &str) -> usize {
 
 /// Inserts `value` immediately before or after the first occurrence of
 /// `pivot`. Returns the new length, or `None` if `pivot` is absent.
-pub fn insert(list: &mut List, before: bool, pivot: &str, value: &str) -> Option<usize> {
-    let pos = list.iter().position(|v| v.as_str() == pivot)?;
+pub fn insert(list: &mut List, before: bool, pivot: &[u8], value: &[u8]) -> Option<usize> {
+    let pos = list.iter().position(|v| v.as_slice() == pivot)?;
     let at = if before { pos } else { pos + 1 };
-    list.insert(at, value.to_string());
+    list.insert(at, value.to_vec());
     Some(list.len())
 }
 
@@ -111,15 +113,24 @@ mod tests {
     use super::*;
 
     fn list_of(values: &[&str]) -> List {
-        values.iter().map(|v| v.to_string()).collect()
+        values.iter().map(|v| v.as_bytes().to_vec()).collect()
+    }
+
+    /// Renders a range result as strings, so the assertions stay
+    /// readable.
+    fn text(values: Vec<&[u8]>) -> Vec<String> {
+        values
+            .into_iter()
+            .map(|v| String::from_utf8(v.to_vec()).unwrap())
+            .collect()
     }
 
     #[test]
     fn range_handles_negative_indices() {
         let list = list_of(&["a", "b", "c", "d"]);
-        assert_eq!(range(&list, 0, -1), vec!["a", "b", "c", "d"]);
-        assert_eq!(range(&list, 1, 2), vec!["b", "c"]);
-        assert_eq!(range(&list, -2, -1), vec!["c", "d"]);
+        assert_eq!(text(range(&list, 0, -1)), vec!["a", "b", "c", "d"]);
+        assert_eq!(text(range(&list, 1, 2)), vec!["b", "c"]);
+        assert_eq!(text(range(&list, -2, -1)), vec!["c", "d"]);
     }
 
     #[test]
@@ -141,7 +152,7 @@ mod tests {
     fn trim_keeps_only_the_requested_window() {
         let mut list = list_of(&["a", "b", "c", "d", "e"]);
         trim(&mut list, 1, 3);
-        assert_eq!(range(&list, 0, -1), vec!["b", "c", "d"]);
+        assert_eq!(text(range(&list, 0, -1)), vec!["b", "c", "d"]);
     }
 
     #[test]
@@ -154,25 +165,25 @@ mod tests {
     #[test]
     fn remove_honors_count_direction() {
         let mut list = list_of(&["x", "a", "x", "b", "x"]);
-        assert_eq!(remove(&mut list, 2, "x"), 2);
-        assert_eq!(range(&list, 0, -1), vec!["a", "b", "x"]);
+        assert_eq!(remove(&mut list, 2, b"x"), 2);
+        assert_eq!(text(range(&list, 0, -1)), vec!["a", "b", "x"]);
 
         let mut list = list_of(&["x", "a", "x", "b", "x"]);
-        assert_eq!(remove(&mut list, -1, "x"), 1);
-        assert_eq!(range(&list, 0, -1), vec!["x", "a", "x", "b"]);
+        assert_eq!(remove(&mut list, -1, b"x"), 1);
+        assert_eq!(text(range(&list, 0, -1)), vec!["x", "a", "x", "b"]);
 
         let mut list = list_of(&["x", "a", "x"]);
-        assert_eq!(remove(&mut list, 0, "x"), 2);
-        assert_eq!(range(&list, 0, -1), vec!["a"]);
+        assert_eq!(remove(&mut list, 0, b"x"), 2);
+        assert_eq!(text(range(&list, 0, -1)), vec!["a"]);
     }
 
     #[test]
     fn insert_before_and_after_a_pivot() {
         let mut list = list_of(&["a", "c"]);
-        assert_eq!(insert(&mut list, true, "c", "b"), Some(3));
-        assert_eq!(range(&list, 0, -1), vec!["a", "b", "c"]);
-        assert_eq!(insert(&mut list, false, "c", "d"), Some(4));
-        assert_eq!(range(&list, 0, -1), vec!["a", "b", "c", "d"]);
-        assert_eq!(insert(&mut list, true, "nope", "z"), None);
+        assert_eq!(insert(&mut list, true, b"c", b"b"), Some(3));
+        assert_eq!(text(range(&list, 0, -1)), vec!["a", "b", "c"]);
+        assert_eq!(insert(&mut list, false, b"c", b"d"), Some(4));
+        assert_eq!(text(range(&list, 0, -1)), vec!["a", "b", "c", "d"]);
+        assert_eq!(insert(&mut list, true, b"nope", b"z"), None);
     }
 }

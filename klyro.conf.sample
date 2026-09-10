@@ -47,9 +47,20 @@ save-interval 60
 sweep-interval 1000
 
 # Largest string a value may grow to, in bytes. Enforced by APPEND and
-# SETRANGE, which reply `ERR resulting string too long` rather than
-# growing past it.
-max-string-bytes 65536
+# SETRANGE, which reply an error rather than growing past it. The
+# default matches Redis's 512 MB ceiling on a string value.
+max-string-bytes 536870912
+
+# ----- protocol -----------------------------------------------------
+
+# Largest bulk string a client may send in one argument. A request over
+# this is a protocol error, which closes the connection.
+proto-max-bulk-len 536870912
+
+# How much unsent reply may pile up for one client before its
+# connection is closed. This is what replaced the old protocol's
+# silent 64 KiB reply truncation.
+client-output-buffer-limit 268435456
 
 # The COUNT a SCAN uses when the caller doesn't give one.
 scan-default-count 10

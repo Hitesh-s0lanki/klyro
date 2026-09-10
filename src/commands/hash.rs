@@ -1,255 +1,200 @@
 //! Hash commands.
 
-use super::{check_type, remaining_tokens, reply_list, reply_ok_or_missing, usage};
+use super::{check_type, exact_args, min_args, not_a_float, parse_float, parse_int, Checked};
 use crate::app::App;
-use crate::server::Conn;
+use crate::resp::Reply;
 use crate::store::StoreType;
-use crate::util::strutil::{format_g, next_token, parse_double, parse_long, trim};
+use crate::util::bytes::{format_f64, parse_f64, parse_i64, Bytes};
 
-pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
-    let mut rest = rest;
+pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Reply {
+    match handle(app, name, argv) {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
 
-    match cmd {
-        // HSET keeps its rest-of-line value (so hash values may contain
-        // spaces); HMSET is the variadic form, with single-token values.
-        "HSET" | "HSETNX" => {
-            let key = next_token(&mut rest);
-            let field = next_token(&mut rest);
-            let value = rest;
-            let (key, field) = match (key, field) {
-                (Some(k), Some(f)) if !value.is_empty() => (k, f),
-                _ => return usage(conn, &format!("{} key field value", cmd)),
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
+fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
+    match name {
+        // HSET is variadic now that RESP delimits arguments; HMSET is
+        // the same command with Redis's older reply.
+        "HSET" | "HMSET" => {
+            min_args(argv, name, 3)?;
+            if !argv[2..].len().is_multiple_of(2) {
+                return Err(Reply::wrong_arity(name));
             }
-            let h = app.store.get_or_create_hash(key).expect("type checked");
-            if cmd == "HSETNX" && h.contains_key(field) {
-                return conn.reply("FALSE\r\n");
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let h = app
+                .store
+                .get_or_create_hash(&argv[1])
+                .expect("type checked");
+            let mut added = 0;
+            for pair in argv[2..].chunks(2) {
+                if h.insert(pair[0].clone(), pair[1].clone()).is_none() {
+                    added += 1;
+                }
             }
-            h.insert(field.to_string(), value.to_string());
-            conn.reply("OK\r\n");
+            Ok(if name == "HMSET" {
+                Reply::ok()
+            } else {
+                Reply::Integer(added)
+            })
         }
 
-        "HMSET" => {
-            let key = next_token(&mut rest);
-            let tokens = remaining_tokens(&mut rest);
-            let (key, tokens) = match key {
-                Some(k) if !tokens.is_empty() && tokens.len().is_multiple_of(2) => (k, tokens),
-                _ => return usage(conn, "HMSET key field value [field value ...]"),
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
+        "HSETNX" => {
+            exact_args(argv, name, 3)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let h = app
+                .store
+                .get_or_create_hash(&argv[1])
+                .expect("type checked");
+            if h.contains_key(&argv[2]) {
+                // The key may have just been created empty, so clean up.
+                app.store.delete_if_empty(&argv[1]);
+                return Ok(Reply::bool(false));
             }
-            let h = app.store.get_or_create_hash(key).expect("type checked");
-            for pair in tokens.chunks(2) {
-                h.insert(pair[0].to_string(), pair[1].to_string());
-            }
-            conn.reply("OK\r\n");
+            h.insert(argv[2].clone(), argv[3].clone());
+            Ok(Reply::bool(true))
         }
 
         "HGET" => {
-            let key = next_token(&mut rest);
-            let field = trim(rest);
-            let Some(key) = key.filter(|_| !field.is_empty()) else {
-                return usage(conn, "HGET key field");
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
+            exact_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
             let value = app
                 .store
-                .get_existing_hash(key)
-                .and_then(|h| h.get(field).cloned());
-            match value {
-                Some(v) => conn.reply(&format!("VALUE {}\r\n", v)),
-                None => conn.reply("NOT_FOUND\r\n"),
-            }
+                .get_existing_hash(&argv[1])
+                .and_then(|h| h.get(&argv[2]).cloned());
+            Ok(value.map_or(Reply::Nil, Reply::Bulk))
         }
 
         "HMGET" => {
-            let key = next_token(&mut rest);
-            let fields = remaining_tokens(&mut rest);
-            let (key, fields) = match key {
-                Some(k) if !fields.is_empty() => (k, fields),
-                _ => return usage(conn, "HMGET key field [field ...]"),
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
-            let hash = app.store.get_existing_hash(key);
-            let lines: Vec<String> = fields
+            min_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let hash = app.store.get_existing_hash(&argv[1]).cloned();
+            let values = argv[2..]
                 .iter()
-                .map(|field| match hash.as_ref().and_then(|h| h.get(*field)) {
-                    Some(v) => format!("VALUE {}", v),
-                    None => "NOT_FOUND".to_string(),
+                .map(|field| match hash.as_ref().and_then(|h| h.get(field)) {
+                    Some(v) => Reply::bulk(v.clone()),
+                    None => Reply::Nil,
                 })
                 .collect();
-            reply_list(conn, lines);
+            Ok(Reply::array(values))
         }
 
         "HDEL" => {
-            let key = next_token(&mut rest);
-            let fields = remaining_tokens(&mut rest);
-            let (key, fields) = match key {
-                Some(k) if !fields.is_empty() => (k, fields),
-                _ => return usage(conn, "HDEL key field [field ...]"),
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
-            let removed = match app.store.get_existing_hash(key) {
-                Some(h) => fields.iter().filter(|f| h.remove(**f).is_some()).count(),
+            min_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let removed = match app.store.get_existing_hash(&argv[1]) {
+                Some(h) => argv[2..].iter().filter(|f| h.remove(*f).is_some()).count(),
                 None => 0,
             };
-            app.store.delete_if_empty(key);
-            if fields.len() == 1 {
-                reply_ok_or_missing(conn, removed == 1);
-            } else {
-                conn.reply(&format!("DELETED {}\r\n", removed));
-            }
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::Integer(removed as i64))
         }
 
         "HLEN" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "HLEN key");
-            }
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
-            let len = app.store.get_existing_hash(key).map_or(0, |h| h.len());
-            conn.reply(&format!("LEN {}\r\n", len));
+            exact_args(argv, name, 1)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let len = app.store.get_existing_hash(&argv[1]).map_or(0, |h| h.len());
+            Ok(Reply::Integer(len as i64))
         }
 
         "HEXISTS" => {
-            let key = next_token(&mut rest);
-            let field = trim(rest);
-            let Some(key) = key.filter(|_| !field.is_empty()) else {
-                return usage(conn, "HEXISTS key field");
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
+            exact_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
             let present = app
                 .store
-                .get_existing_hash(key)
-                .is_some_and(|h| h.contains_key(field));
-            conn.reply(if present { "TRUE\r\n" } else { "FALSE\r\n" });
+                .get_existing_hash(&argv[1])
+                .is_some_and(|h| h.contains_key(&argv[2]));
+            Ok(Reply::bool(present))
         }
 
         "HSTRLEN" => {
-            let key = next_token(&mut rest);
-            let field = trim(rest);
-            let Some(key) = key.filter(|_| !field.is_empty()) else {
-                return usage(conn, "HSTRLEN key field");
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
+            exact_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
             let len = app
                 .store
-                .get_existing_hash(key)
-                .and_then(|h| h.get(field).map(|v| v.len()))
+                .get_existing_hash(&argv[1])
+                .and_then(|h| h.get(&argv[2]).map(|v| v.len()))
                 .unwrap_or(0);
-            conn.reply(&format!("LEN {}\r\n", len));
+            Ok(Reply::Integer(len as i64))
         }
 
         "HKEYS" | "HVALS" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, &format!("{} key", cmd));
-            }
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
-            let wants_keys = cmd == "HKEYS";
-            let items: Vec<String> = app
+            exact_args(argv, name, 1)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let wants_keys = name == "HKEYS";
+            let items: Vec<Bytes> = app
                 .store
-                .get_existing_hash(key)
+                .get_existing_hash(&argv[1])
                 .map(|h| {
                     h.iter()
                         .map(|(f, v)| if wants_keys { f.clone() } else { v.clone() })
                         .collect()
                 })
                 .unwrap_or_default();
-            reply_list(conn, items);
+            Ok(Reply::bulk_array(items))
         }
 
         "HGETALL" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "HGETALL key");
-            }
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
-            if let Some(hash) = app.store.get_existing_hash(key) {
-                let pairs: Vec<(String, String)> =
-                    hash.iter().map(|(f, v)| (f.clone(), v.clone())).collect();
-                for (field, value) in pairs {
-                    conn.reply(&format!("{}\r\n{}\r\n", field, value));
+            exact_args(argv, name, 1)?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let mut pairs = Vec::new();
+            if let Some(hash) = app.store.get_existing_hash(&argv[1]) {
+                for (field, value) in hash.iter() {
+                    pairs.push((Reply::bulk(field.clone()), Reply::bulk(value.clone())));
                 }
             }
-            conn.reply("END\r\n");
+            Ok(Reply::Map(pairs))
         }
 
-        "HINCRBY" | "HINCRBYFLOAT" => {
-            let key = next_token(&mut rest);
-            let field = next_token(&mut rest);
-            let increment = trim(rest);
-            let (key, field) = match (key, field) {
-                (Some(k), Some(f)) if !increment.is_empty() => (k, f),
-                _ => return usage(conn, &format!("{} key field increment", cmd)),
-            };
-            if !check_type(app, conn, key, StoreType::Hash) {
-                return;
-            }
+        "HINCRBY" => {
+            exact_args(argv, name, 3)?;
+            let delta = parse_int(&argv[3])?;
+            check_type(app, &argv[1], StoreType::Hash)?;
             let current = app
                 .store
-                .get_existing_hash(key)
-                .and_then(|h| h.get(field).cloned());
-
-            let updated = if cmd == "HINCRBY" {
-                let Some(delta) = parse_long(increment) else {
-                    return usage(conn, "HINCRBY key field increment");
-                };
-                let base = match current {
-                    None => 0,
-                    Some(v) => match parse_long(&v) {
-                        Some(n) => n,
-                        None => return conn.reply("ERR hash value is not an integer\r\n"),
-                    },
-                };
-                match base.checked_add(delta) {
-                    Some(n) => n.to_string(),
-                    None => return conn.reply("ERR increment or decrement would overflow\r\n"),
-                }
-            } else {
-                let Some(delta) = parse_double(increment) else {
-                    return usage(conn, "HINCRBYFLOAT key field increment");
-                };
-                let base = match current {
-                    None => 0.0,
-                    Some(v) => match parse_double(&v) {
-                        Some(f) => f,
-                        None => return conn.reply("ERR hash value is not a float\r\n"),
-                    },
-                };
-                let sum = base + delta;
-                if !sum.is_finite() {
-                    return conn.reply("ERR increment would produce NaN or Infinity\r\n");
-                }
-                format_g(sum, 17)
+                .get_existing_hash(&argv[1])
+                .and_then(|h| h.get(&argv[2]).cloned());
+            let base = match current {
+                None => 0,
+                Some(v) => match parse_i64(&v) {
+                    Some(n) => n,
+                    None => return Ok(Reply::error("ERR hash value is not an integer")),
+                },
             };
-
+            let Some(updated) = base.checked_add(delta) else {
+                return Ok(Reply::error("ERR increment or decrement would overflow"));
+            };
             app.store
-                .get_or_create_hash(key)
+                .get_or_create_hash(&argv[1])
                 .expect("type checked")
-                .insert(field.to_string(), updated.clone());
-            conn.reply(&format!("VALUE {}\r\n", updated));
+                .insert(argv[2].clone(), updated.to_string().into_bytes());
+            Ok(Reply::Integer(updated))
         }
 
-        _ => conn.reply("ERR unknown command\r\n"),
+        "HINCRBYFLOAT" => {
+            exact_args(argv, name, 3)?;
+            let delta = parse_float(&argv[3])?;
+            check_type(app, &argv[1], StoreType::Hash)?;
+            let current = app
+                .store
+                .get_existing_hash(&argv[1])
+                .and_then(|h| h.get(&argv[2]).cloned());
+            let base = match current {
+                None => 0.0,
+                Some(v) => parse_f64(&v).ok_or_else(not_a_float)?,
+            };
+            let sum = base + delta;
+            if !sum.is_finite() {
+                return Ok(Reply::error("ERR increment would produce NaN or Infinity"));
+            }
+            let text = format_f64(sum);
+            app.store
+                .get_or_create_hash(&argv[1])
+                .expect("type checked")
+                .insert(argv[2].clone(), text.clone());
+            Ok(Reply::Bulk(text))
+        }
+
+        _ => Ok(Reply::error("ERR unknown command")),
     }
 }

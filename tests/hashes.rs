@@ -1,114 +1,130 @@
-//! Hash commands added beyond HSET/HGET/HDEL/HLEN/HGETALL.
+//! Hash commands.
 
 mod common;
 
-use common::{lines_before_terminator, KlyroServer};
-
-const WRONGTYPE: &str = "ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-
-/// Hash iteration order is unspecified, so compare sorted.
-fn sorted(reply: &str) -> Vec<&str> {
-    let mut lines = lines_before_terminator(reply, "END");
-    lines.sort_unstable();
-    lines
-}
+use common::{bulk, int, nil, ok, KlyroServer, Value, WRONGTYPE};
 
 #[test]
-fn hmset_writes_several_fields_at_once() {
+fn hset_is_variadic_and_counts_new_fields() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("HMSET u name Alice age 30"), "OK\r\n");
-    assert_eq!(client.send("HGET u name"), "VALUE Alice\r\n");
-    assert_eq!(client.send("HLEN u"), "LEN 2\r\n");
+    assert_eq!(client.send("HSET u name Alice age 30"), int(2));
+    // Overwriting an existing field adds nothing.
+    assert_eq!(client.send("HSET u name Bob"), int(0));
+    assert_eq!(client.send("HGET u name"), bulk("Bob"));
+    assert_eq!(client.send("HLEN u"), int(2));
     assert_eq!(
-        client.send("HMSET u dangling"),
-        "ERR usage: HMSET key field value [field value ...]\r\n"
+        client.send("HSET u dangling").error(),
+        "ERR wrong number of arguments for 'hset' command"
     );
 }
 
 #[test]
-fn hset_still_takes_a_value_with_spaces() {
+fn hmset_is_hset_with_the_older_reply() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    client.send("HSET u name Alice Smith");
-    assert_eq!(client.send("HGET u name"), "VALUE Alice Smith\r\n");
+    assert_eq!(client.send("HMSET u name Alice age 30"), ok());
+    assert_eq!(client.send("HLEN u"), int(2));
+}
+
+#[test]
+fn fields_and_values_may_contain_spaces() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    assert_eq!(
+        client.call(&["HSET", "u", "full name", "Alice Smith"]),
+        int(1)
+    );
+    assert_eq!(
+        client.call(&["HGET", "u", "full name"]),
+        bulk("Alice Smith")
+    );
 }
 
 #[test]
 fn hsetnx_writes_only_a_missing_field() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("HSETNX u f first"), "OK\r\n");
-    assert_eq!(client.send("HSETNX u f second"), "FALSE\r\n");
-    assert_eq!(client.send("HGET u f"), "VALUE first\r\n");
+    assert_eq!(client.send("HSETNX u f first"), int(1));
+    assert_eq!(client.send("HSETNX u f second"), int(0));
+    assert_eq!(client.send("HGET u f"), bulk("first"));
 }
 
 #[test]
-fn hmget_reports_each_field_in_order() {
+fn hsetnx_on_a_missing_key_leaves_nothing_behind_when_it_declines() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("HSET u f v");
+    client.send("HDEL u f");
+    // The key is gone; a declined HSETNX must not resurrect it empty.
+    assert_eq!(client.send("HSETNX u f x"), int(1));
+    assert_eq!(client.send("HLEN u"), int(1));
+}
+
+#[test]
+fn hget_and_hmget() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     client.send("HMSET u a 1 b 2");
-    let reply = client.send("HMGET u a b missing");
+    assert_eq!(client.send("HGET u a"), bulk("1"));
+    assert_eq!(client.send("HGET u missing"), nil());
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["VALUE 1", "VALUE 2", "NOT_FOUND"]
+        client.send("HMGET u a b missing"),
+        Value::Array(vec![bulk("1"), bulk("2"), nil()])
+    );
+    assert_eq!(
+        client.send("HMGET nope a b"),
+        Value::Array(vec![nil(), nil()])
     );
 }
 
 #[test]
-fn hmget_on_a_missing_key_reports_every_field_missing() {
-    let server = KlyroServer::new();
-    let mut client = server.connect();
-    let reply = client.send("HMGET nope a b");
-    assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["NOT_FOUND", "NOT_FOUND"]
-    );
-}
-
-#[test]
-fn hexists_and_hstrlen_inspect_a_field() {
-    let server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("HSET u name Alice");
-    assert_eq!(client.send("HEXISTS u name"), "TRUE\r\n");
-    assert_eq!(client.send("HEXISTS u nope"), "FALSE\r\n");
-    assert_eq!(client.send("HSTRLEN u name"), "LEN 5\r\n");
-    assert_eq!(client.send("HSTRLEN u nope"), "LEN 0\r\n");
-}
-
-#[test]
-fn hkeys_and_hvals_split_the_hash() {
-    let server = KlyroServer::new();
-    let mut client = server.connect();
-    client.send("HMSET u a 1 b 2");
-    assert_eq!(sorted(&client.send("HKEYS u")), vec!["a", "b"]);
-    assert_eq!(sorted(&client.send("HVALS u")), vec!["1", "2"]);
-    assert!(sorted(&client.send("HKEYS missing")).is_empty());
-}
-
-#[test]
-fn hdel_keeps_its_single_field_reply_and_counts_multiples() {
+fn hdel_counts_what_it_removed() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     client.send("HMSET u a 1 b 2 c 3");
-    assert_eq!(client.send("HDEL u a"), "OK\r\n");
-    assert_eq!(client.send("HDEL u a"), "NOT_FOUND\r\n");
-    assert_eq!(client.send("HDEL u b c nope"), "DELETED 2\r\n");
-    assert_eq!(client.send("EXISTS u"), "COUNT 0\r\n");
+    assert_eq!(client.send("HDEL u a"), int(1));
+    assert_eq!(client.send("HDEL u a"), int(0));
+    assert_eq!(client.send("HDEL u b c nope"), int(2));
+    assert_eq!(client.send("EXISTS u"), int(0));
+}
+
+#[test]
+fn hexists_and_hstrlen() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("HSET u name Alice");
+    assert_eq!(client.send("HEXISTS u name"), int(1));
+    assert_eq!(client.send("HEXISTS u nope"), int(0));
+    assert_eq!(client.send("HSTRLEN u name"), int(5));
+    assert_eq!(client.send("HSTRLEN u nope"), int(0));
+}
+
+#[test]
+fn hkeys_hvals_and_hgetall() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("HMSET u a 1 b 2");
+    assert_eq!(client.send("HKEYS u").sorted(), vec!["a", "b"]);
+    assert_eq!(client.send("HVALS u").sorted(), vec!["1", "2"]);
+    assert_eq!(
+        client.send("HGETALL u").pairs(),
+        vec![("a".to_string(), "1".to_string()), ("b".into(), "2".into())]
+    );
+    assert_eq!(client.send("HKEYS missing"), Value::Array(vec![]));
 }
 
 #[test]
 fn hincrby_counts_within_a_hash() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("HINCRBY u hits 1"), "VALUE 1\r\n");
-    assert_eq!(client.send("HINCRBY u hits 9"), "VALUE 10\r\n");
-    assert_eq!(client.send("HINCRBY u hits -4"), "VALUE 6\r\n");
+    assert_eq!(client.send("HINCRBY u hits 1"), int(1));
+    assert_eq!(client.send("HINCRBY u hits 9"), int(10));
+    assert_eq!(client.send("HINCRBY u hits -4"), int(6));
     client.send("HSET u name Alice");
     assert_eq!(
-        client.send("HINCRBY u name 1"),
-        "ERR hash value is not an integer\r\n"
+        client.send("HINCRBY u name 1").error(),
+        "ERR hash value is not an integer"
     );
 }
 
@@ -116,30 +132,34 @@ fn hincrby_counts_within_a_hash() {
 fn hincrbyfloat_accumulates_fractions() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("HINCRBYFLOAT u score 1.5"), "VALUE 1.5\r\n");
-    assert_eq!(client.send("HINCRBYFLOAT u score 2.25"), "VALUE 3.75\r\n");
+    assert_eq!(client.send("HINCRBYFLOAT u score 1.5"), bulk("1.5"));
+    assert_eq!(client.send("HINCRBYFLOAT u score 2.25"), bulk("3.75"));
     client.send("HSET u name Alice");
     assert_eq!(
-        client.send("HINCRBYFLOAT u name 1"),
-        "ERR hash value is not a float\r\n"
+        client.send("HINCRBYFLOAT u name 1").error(),
+        "ERR value is not a valid float"
     );
 }
 
 #[test]
-fn new_hash_commands_reject_wrong_types() {
+fn hash_commands_reject_wrong_types() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     client.send("SET s v");
-    for cmd in [
-        "HMSET s a 1",
+    for command in [
+        "HSET s a 1",
+        "HGET s a",
         "HMGET s a",
+        "HDEL s a",
+        "HLEN s",
         "HSETNX s a 1",
         "HEXISTS s a",
         "HKEYS s",
         "HVALS s",
+        "HGETALL s",
         "HSTRLEN s a",
         "HINCRBY s a 1",
     ] {
-        assert_eq!(client.send(cmd), WRONGTYPE, "for {cmd}");
+        assert_eq!(client.send(command).error(), WRONGTYPE, "for {command}");
     }
 }

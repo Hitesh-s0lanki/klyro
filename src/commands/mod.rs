@@ -1,12 +1,10 @@
-//! Command parsing and dispatch. The router lives here; the handlers
-//! are grouped by the data type they operate on, mirroring `types/`.
+//! Command dispatch. The router lives here; the handlers are grouped by
+//! the data type they operate on, mirroring `types/`.
 //!
-//! Every handler takes the already-uppercased command name plus the
-//! unparsed remainder of the line, and writes its own reply. Argument
-//! parsing is per-command rather than table-driven because the line
-//! protocol's "last argument is the rest of the line" rule (which keeps
-//! values with spaces working for SET/HSET/LSET) can't be expressed as
-//! a uniform arity.
+//! A handler takes the argument vector exactly as the client sent it -
+//! `argv[0]` is the command name, raw bytes throughout - and returns a
+//! [`Reply`]. Nothing writes to the connection directly, so a command's
+//! result is a value that can be inspected and tested on its own.
 
 mod generic;
 mod hash;
@@ -17,59 +15,82 @@ mod string;
 mod zset;
 
 use crate::app::App;
-use crate::server::Conn;
+use crate::resp::{Protocol, Reply};
 use crate::store::StoreType;
-use crate::util::strutil::{next_token, trim};
+use crate::util::bytes::{to_display, to_upper, Bytes};
 
-const WRONGTYPE: &str = "ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+/// What dispatch produced: a reply, plus whether the connection should
+/// close once it has been flushed.
+pub struct Response {
+    pub reply: Reply,
+    pub close: bool,
+    /// Set by HELLO when it switches the connection's protocol version.
+    pub protocol: Option<Protocol>,
+}
 
-/// Replies WRONGTYPE and returns `false` if `key` exists with a type
-/// other than `want`; otherwise (missing, or already the right type)
-/// returns `true` and replies nothing.
-pub(crate) fn check_type(app: &mut App, conn: &mut Conn, key: &str, want: StoreType) -> bool {
-    // `peek_type`, not `type_of`: a type check is bookkeeping, not a
-    // lookup the caller asked for, and counting it would double every
-    // read command's contribution to INFO's hit ratio.
-    match app.store.peek_type(key) {
-        Some(t) if t != want => {
-            conn.reply(WRONGTYPE);
-            false
+impl Response {
+    fn new(reply: Reply) -> Response {
+        Response {
+            reply,
+            close: false,
+            protocol: None,
         }
-        _ => true,
     }
 }
 
-/// Replies `ERR usage: <spec>`.
-pub(crate) fn usage(conn: &mut Conn, spec: &str) {
-    conn.reply(&format!("ERR usage: {}\r\n", spec));
+/// Both arms of these results carry a reply; `Err` just marks the ones
+/// that stop the handler early, so argument checks can use `?`.
+pub(crate) type Checked<T> = Result<T, Reply>;
+
+pub(crate) fn wrongtype() -> Reply {
+    Reply::error("WRONGTYPE Operation against a key holding the wrong kind of value")
 }
 
-/// Sends one line per item, then the `END` terminator that every
-/// multi-line reply in this protocol closes with.
-pub(crate) fn reply_list<I, S>(conn: &mut Conn, items: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    for item in items {
-        conn.reply(&format!("{}\r\n", item.as_ref()));
+pub(crate) fn not_an_integer() -> Reply {
+    Reply::error("ERR value is not an integer or out of range")
+}
+
+pub(crate) fn not_a_float() -> Reply {
+    Reply::error("ERR value is not a valid float")
+}
+
+pub(crate) fn syntax_error() -> Reply {
+    Reply::error("ERR syntax error")
+}
+
+/// Fails with WRONGTYPE if `key` holds something other than `want`. A
+/// missing key passes, since most commands create it.
+pub(crate) fn check_type(app: &mut App, key: &[u8], want: StoreType) -> Checked<()> {
+    match app.store.peek_type(key) {
+        Some(found) if found != want => Err(wrongtype()),
+        _ => Ok(()),
     }
-    conn.reply("END\r\n");
 }
 
-/// Replies `OK` or `NOT_FOUND` - the shape most mutating single-key
-/// commands use.
-pub(crate) fn reply_ok_or_missing(conn: &mut Conn, ok: bool) {
-    conn.reply(if ok { "OK\r\n" } else { "NOT_FOUND\r\n" });
+pub(crate) fn parse_int(arg: &[u8]) -> Checked<i64> {
+    crate::util::bytes::parse_i64(arg).ok_or_else(not_an_integer)
 }
 
-/// Collects every remaining whitespace-delimited token.
-pub(crate) fn remaining_tokens<'a>(rest: &mut &'a str) -> Vec<&'a str> {
-    let mut tokens = Vec::new();
-    while let Some(tok) = next_token(rest) {
-        tokens.push(tok);
+pub(crate) fn parse_float(arg: &[u8]) -> Checked<f64> {
+    crate::util::bytes::parse_f64(arg).ok_or_else(not_a_float)
+}
+
+/// Requires exactly `n` arguments after the command name.
+pub(crate) fn exact_args(argv: &[Bytes], name: &str, n: usize) -> Checked<()> {
+    if argv.len() == n + 1 {
+        Ok(())
+    } else {
+        Err(Reply::wrong_arity(name))
     }
-    tokens
+}
+
+/// Requires at least `n` arguments after the command name.
+pub(crate) fn min_args(argv: &[Bytes], name: &str, n: usize) -> Checked<()> {
+    if argv.len() > n {
+        Ok(())
+    } else {
+        Err(Reply::wrong_arity(name))
+    }
 }
 
 /// Commands that only read the keyspace. INFO's hit ratio counts the
@@ -83,6 +104,7 @@ const READ_COMMANDS: &[&str] = &[
     "GET",
     "MGET",
     "GETRANGE",
+    "SUBSTR",
     "STRLEN",
     "LINDEX",
     "LLEN",
@@ -115,77 +137,81 @@ const READ_COMMANDS: &[&str] = &[
     "ZREVRANK",
 ];
 
-/// Parses and executes one command line, replying on `conn`.
-pub fn dispatch(app: &mut App, conn: &mut Conn, line: &str) {
-    let line = trim(line);
-    if line.is_empty() {
-        return;
+/// Executes one already-parsed command.
+pub fn dispatch(app: &mut App, argv: &[Bytes]) -> Option<Response> {
+    if argv.is_empty() {
+        return None; // an empty inline line or `*0` array
     }
-
-    let mut rest = line;
-    let cmd = match next_token(&mut rest) {
-        Some(c) => c,
-        None => return,
-    };
-    let cmd = cmd.to_ascii_uppercase();
+    let name = to_upper(&argv[0]);
 
     app.stats.total_commands += 1;
     let before = app.store.lookup_counts();
 
-    run(app, conn, &cmd, rest);
+    let response = run(app, &name, argv);
 
     // Attributing the delta, rather than counting inside each handler,
-    // keeps the accounting in one place instead of across 105 commands.
-    if READ_COMMANDS.contains(&cmd.as_str()) {
+    // keeps the accounting in one place instead of across 108 commands.
+    if READ_COMMANDS.contains(&name.as_str()) {
         let after = app.store.lookup_counts();
         app.stats.keyspace_hits += after.0 - before.0;
         app.stats.keyspace_misses += after.1 - before.1;
     }
+    Some(response)
 }
 
-fn run(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
-    match cmd {
+fn run(app: &mut App, name: &str, argv: &[Bytes]) -> Response {
+    match name {
         // --- connection / server ---
-        "PING" | "ECHO" | "INFO" | "CONFIG" | "SAVE" | "QUIT" | "SHUTDOWN" => {
-            server::dispatch(app, conn, cmd, rest)
-        }
+        "PING" | "ECHO" | "INFO" | "CONFIG" | "SAVE" | "QUIT" | "SHUTDOWN" | "COMMAND"
+        | "HELLO" => server::dispatch(app, name, argv),
 
         // --- generic key commands ---
         "DEL" | "UNLINK" | "EXISTS" | "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT"
         | "PERSIST" | "TTL" | "PTTL" | "TYPE" | "KEYS" | "SCAN" | "DBSIZE" | "RENAME"
         | "RENAMENX" | "COPY" | "RANDOMKEY" | "FLUSHDB" | "FLUSHALL" => {
-            generic::dispatch(app, conn, cmd, rest)
+            Response::new(generic::dispatch(app, name, argv))
         }
 
         // --- string commands ---
         "SET" | "SETNX" | "SETEX" | "PSETEX" | "GET" | "GETSET" | "GETDEL" | "GETEX" | "MGET"
-        | "MSET" | "INCR" | "DECR" | "INCRBY" | "DECRBY" | "INCRBYFLOAT" | "APPEND" | "STRLEN"
-        | "GETRANGE" | "SETRANGE" => string::dispatch(app, conn, cmd, rest),
+        | "MSET" | "MSETNX" | "INCR" | "DECR" | "INCRBY" | "DECRBY" | "INCRBYFLOAT" | "APPEND"
+        | "STRLEN" | "GETRANGE" | "SUBSTR" | "SETRANGE" => {
+            Response::new(string::dispatch(app, name, argv))
+        }
 
         // --- list commands ---
         "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" | "LPOP" | "RPOP" | "LLEN" | "LRANGE"
         | "LINDEX" | "LSET" | "LINSERT" | "LREM" | "LTRIM" | "RPOPLPUSH" | "LMOVE" => {
-            list::dispatch(app, conn, cmd, rest)
+            Response::new(list::dispatch(app, name, argv))
         }
 
         // --- hash commands ---
         "HSET" | "HSETNX" | "HMSET" | "HGET" | "HMGET" | "HDEL" | "HLEN" | "HEXISTS" | "HKEYS"
         | "HVALS" | "HGETALL" | "HINCRBY" | "HINCRBYFLOAT" | "HSTRLEN" => {
-            hash::dispatch(app, conn, cmd, rest)
+            Response::new(hash::dispatch(app, name, argv))
         }
 
         // --- set commands ---
         "SADD" | "SREM" | "SISMEMBER" | "SMISMEMBER" | "SCARD" | "SMEMBERS" | "SPOP"
         | "SRANDMEMBER" | "SMOVE" | "SINTER" | "SINTERSTORE" | "SUNION" | "SUNIONSTORE"
-        | "SDIFF" | "SDIFFSTORE" => set::dispatch(app, conn, cmd, rest),
+        | "SDIFF" | "SDIFFSTORE" => Response::new(set::dispatch(app, name, argv)),
 
         // --- sorted set commands ---
         "ZADD" | "ZSCORE" | "ZMSCORE" | "ZINCRBY" | "ZREM" | "ZCARD" | "ZCOUNT" | "ZRANGE"
         | "ZREVRANGE" | "ZRANGEBYSCORE" | "ZREVRANGEBYSCORE" | "ZRANK" | "ZREVRANK"
         | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "ZPOPMIN" | "ZPOPMAX" => {
-            zset::dispatch(app, conn, cmd, rest)
+            Response::new(zset::dispatch(app, name, argv))
         }
 
-        _ => conn.reply("ERR unknown command\r\n"),
+        _ => Response::new(Reply::error(format!(
+            "ERR unknown command '{}', with args beginning with: {}",
+            to_display(&argv[0]),
+            argv[1..]
+                .iter()
+                .take(3)
+                .map(|a| format!("'{}'", to_display(a)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
 }

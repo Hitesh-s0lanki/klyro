@@ -1,320 +1,270 @@
 //! Sorted set commands.
 
-use super::{check_type, remaining_tokens, reply_list, reply_ok_or_missing, usage};
+use super::{check_type, exact_args, min_args, parse_float, parse_int, syntax_error, Checked};
 use crate::app::App;
-use crate::server::Conn;
+use crate::resp::Reply;
 use crate::store::StoreType;
 use crate::types::zset::ScoreBound;
-use crate::util::strutil::{format_g, next_token, parse_double, parse_long, trim};
+use crate::util::bytes::{eq_ignore_case, Bytes};
 
-/// Scores are shown at 6 significant digits (what the dump file's 17
-/// would look like is an implementation detail, not a display format).
-fn score_text(score: f64) -> String {
-    format_g(score, 6)
+pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Reply {
+    match handle(app, name, argv) {
+        Ok(reply) | Err(reply) => reply,
+    }
 }
 
-fn member_score_lines(pairs: &[(String, f64)]) -> Vec<String> {
-    pairs
-        .iter()
-        .map(|(m, s)| format!("{} {}", m, score_text(*s)))
-        .collect()
+/// Renders (member, score) pairs. Without scores it is a plain array of
+/// members; with them, `ScoredMembers` handles the RESP2/RESP3 shape
+/// difference.
+fn pairs_reply(pairs: Vec<(Bytes, f64)>, with_scores: bool) -> Reply {
+    if with_scores {
+        Reply::ScoredMembers(pairs)
+    } else {
+        Reply::bulk_array(pairs.into_iter().map(|(member, _)| member))
+    }
 }
 
-/// Parses the `min max` pair every score-range command takes.
-fn score_bounds(rest: &mut &str) -> Option<(ScoreBound, ScoreBound)> {
-    let first = next_token(rest).and_then(ScoreBound::parse)?;
-    let second = ScoreBound::parse(trim(rest))?;
-    Some((first, second))
+fn owned(pairs: Vec<(&[u8], f64)>) -> Vec<(Bytes, f64)> {
+    pairs.into_iter().map(|(m, s)| (m.to_vec(), s)).collect()
 }
 
-pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
-    let mut rest = rest;
+/// Parses a `min max` pair, rejecting a bound that isn't a score.
+fn score_bounds(min: &[u8], max: &[u8]) -> Checked<(ScoreBound, ScoreBound)> {
+    match (ScoreBound::parse(min), ScoreBound::parse(max)) {
+        (Some(a), Some(b)) => Ok((a, b)),
+        _ => Err(Reply::error("ERR min or max is not a float")),
+    }
+}
 
-    match cmd {
-        "ZADD" => zadd(app, conn, rest),
+/// Reads a trailing `WITHSCORES`, if present.
+fn with_scores(argv: &[Bytes], from: usize) -> Checked<bool> {
+    match argv.len() - from {
+        0 => Ok(false),
+        1 if eq_ignore_case(&argv[from], "WITHSCORES") => Ok(true),
+        _ => Err(syntax_error()),
+    }
+}
+
+fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
+    match name {
+        "ZADD" => zadd(app, argv),
 
         "ZSCORE" => {
-            let key = next_token(&mut rest);
-            let member = trim(rest);
-            let Some(key) = key.filter(|_| !member.is_empty()) else {
-                return usage(conn, "ZSCORE key member");
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            match app
+            exact_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let score = app
                 .store
-                .get_existing_zset(key)
-                .and_then(|z| z.score(member))
-            {
-                Some(s) => conn.reply(&format!("VALUE {}\r\n", score_text(s))),
-                None => conn.reply("NOT_FOUND\r\n"),
-            }
+                .get_existing_zset(&argv[1])
+                .and_then(|z| z.score(&argv[2]));
+            Ok(score.map_or(Reply::Nil, Reply::Double))
         }
 
         "ZMSCORE" => {
-            let key = next_token(&mut rest);
-            let members = remaining_tokens(&mut rest);
-            let (key, members) = match key {
-                Some(k) if !members.is_empty() => (k, members),
-                _ => return usage(conn, "ZMSCORE key member [member ...]"),
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let zset = app.store.get_existing_zset(key);
-            let lines: Vec<String> = members
-                .iter()
-                .map(|m| match zset.as_ref().and_then(|z| z.score(m)) {
-                    Some(s) => format!("VALUE {}", score_text(s)),
-                    None => "NOT_FOUND".to_string(),
-                })
-                .collect();
-            reply_list(conn, lines);
+            min_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let zset = app.store.get_existing_zset(&argv[1]).cloned();
+            Ok(Reply::array(
+                argv[2..]
+                    .iter()
+                    .map(|m| match zset.as_ref().and_then(|z| z.score(m)) {
+                        Some(s) => Reply::Double(s),
+                        None => Reply::Nil,
+                    })
+                    .collect(),
+            ))
         }
 
         "ZINCRBY" => {
-            let key = next_token(&mut rest);
-            let increment = next_token(&mut rest).and_then(parse_double);
-            let member = trim(rest);
-            let (key, increment) = match (key, increment) {
-                (Some(k), Some(i)) if !member.is_empty() => (k, i),
-                _ => return usage(conn, "ZINCRBY key increment member"),
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
+            exact_args(argv, name, 3)?;
+            let increment = parse_float(&argv[2])?;
+            check_type(app, &argv[1], StoreType::Zset)?;
             let updated = app
                 .store
-                .get_or_create_zset(key)
+                .get_or_create_zset(&argv[1])
                 .expect("type checked")
-                .incr_by(member, increment);
+                .incr_by(&argv[3], increment);
             if !updated.is_finite() {
                 // Undo, so a NaN/inf score never reaches the keyspace.
                 app.store
-                    .get_existing_zset(key)
+                    .get_existing_zset(&argv[1])
                     .expect("just created")
-                    .rem(member);
-                app.store.delete_if_empty(key);
-                return conn.reply("ERR increment would produce NaN or Infinity\r\n");
+                    .rem(&argv[3]);
+                app.store.delete_if_empty(&argv[1]);
+                return Ok(Reply::error("ERR resulting score is not a number (NaN)"));
             }
-            conn.reply(&format!("VALUE {}\r\n", score_text(updated)));
+            Ok(Reply::Double(updated))
         }
 
         "ZREM" => {
-            let key = next_token(&mut rest);
-            let members = remaining_tokens(&mut rest);
-            let (key, members) = match key {
-                Some(k) if !members.is_empty() => (k, members),
-                _ => return usage(conn, "ZREM key member [member ...]"),
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let removed = match app.store.get_existing_zset(key) {
-                Some(z) => members.iter().filter(|m| z.rem(m)).count(),
+            min_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let removed = match app.store.get_existing_zset(&argv[1]) {
+                Some(z) => argv[2..].iter().filter(|m| z.rem(m)).count(),
                 None => 0,
             };
-            app.store.delete_if_empty(key);
-            if members.len() == 1 {
-                reply_ok_or_missing(conn, removed == 1);
-            } else {
-                conn.reply(&format!("DELETED {}\r\n", removed));
-            }
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::Integer(removed as i64))
         }
 
         "ZCARD" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "ZCARD key");
-            }
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let len = app.store.get_existing_zset(key).map_or(0, |z| z.size());
-            conn.reply(&format!("LEN {}\r\n", len));
+            exact_args(argv, name, 1)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let len = app
+                .store
+                .get_existing_zset(&argv[1])
+                .map_or(0, |z| z.size());
+            Ok(Reply::Integer(len as i64))
         }
 
         "ZRANK" | "ZREVRANK" => {
-            let key = next_token(&mut rest);
-            let member = trim(rest);
-            let Some(key) = key.filter(|_| !member.is_empty()) else {
-                return usage(conn, &format!("{} key member", cmd));
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let rank = app.store.get_existing_zset(key).and_then(|z| {
-                if cmd == "ZRANK" {
-                    z.rank(member)
+            exact_args(argv, name, 2)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let rank = app.store.get_existing_zset(&argv[1]).and_then(|z| {
+                if name == "ZRANK" {
+                    z.rank(&argv[2])
                 } else {
-                    z.rev_rank(member)
+                    z.rev_rank(&argv[2])
                 }
             });
-            match rank {
-                Some(r) => conn.reply(&format!("RANK {}\r\n", r)),
-                None => conn.reply("NOT_FOUND\r\n"),
-            }
+            Ok(rank.map_or(Reply::Nil, |r| Reply::Integer(r as i64)))
         }
 
         "ZRANGE" | "ZREVRANGE" => {
-            let key = next_token(&mut rest);
-            let start = next_token(&mut rest).and_then(parse_long);
-            let stop = parse_long(trim(rest));
-            let (key, start, stop) = match (key, start, stop) {
-                (Some(k), Some(s), Some(e)) => (k, s, e),
-                _ => return usage(conn, &format!("{} key start stop", cmd)),
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let pairs: Vec<(String, f64)> = app
+            min_args(argv, name, 3)?;
+            let (start, stop) = (parse_int(&argv[2])?, parse_int(&argv[3])?);
+            let scores = with_scores(argv, 4)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let pairs = app
                 .store
-                .get_existing_zset(key)
+                .get_existing_zset(&argv[1])
                 .map(|z| {
-                    let window = if cmd == "ZRANGE" {
+                    owned(if name == "ZRANGE" {
                         z.range(start, stop)
                     } else {
                         z.rev_range(start, stop)
-                    };
-                    window
-                        .into_iter()
-                        .map(|(m, s)| (m.to_string(), s))
-                        .collect()
+                    })
                 })
                 .unwrap_or_default();
-            reply_list(conn, member_score_lines(&pairs));
+            Ok(pairs_reply(pairs, scores))
         }
 
         // ZREVRANGEBYSCORE takes its bounds high-first, as Redis does.
-        "ZRANGEBYSCORE" | "ZREVRANGEBYSCORE" | "ZCOUNT" | "ZREMRANGEBYSCORE" => {
-            let reversed = cmd == "ZREVRANGEBYSCORE";
-            let spec = if reversed {
-                "ZREVRANGEBYSCORE key max min"
-            } else {
-                "<cmd> key min max"
-            };
-            let key = next_token(&mut rest);
-            let bounds = score_bounds(&mut rest);
-            let (key, (first, second)) = match (key, bounds) {
-                (Some(k), Some(b)) => (k, b),
-                _ => return usage(conn, spec),
-            };
+        "ZRANGEBYSCORE" | "ZREVRANGEBYSCORE" => {
+            min_args(argv, name, 3)?;
+            let reversed = name == "ZREVRANGEBYSCORE";
             let (min, max) = if reversed {
-                (second, first)
+                score_bounds(&argv[3], &argv[2])?
             } else {
-                (first, second)
+                score_bounds(&argv[2], &argv[3])?
             };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-
-            if cmd == "ZCOUNT" {
-                let count = app
-                    .store
-                    .get_existing_zset(key)
-                    .map_or(0, |z| z.count_by_score(min, max));
-                return conn.reply(&format!("COUNT {}\r\n", count));
-            }
-            if cmd == "ZREMRANGEBYSCORE" {
-                let removed = app
-                    .store
-                    .get_existing_zset(key)
-                    .map_or(0, |z| z.remove_range_by_score(min, max));
-                app.store.delete_if_empty(key);
-                return conn.reply(&format!("REMOVED {}\r\n", removed));
-            }
-
-            let mut pairs: Vec<(String, f64)> = app
+            let scores = with_scores(argv, 4)?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let mut pairs = app
                 .store
-                .get_existing_zset(key)
-                .map(|z| {
-                    z.range_by_score(min, max)
-                        .into_iter()
-                        .map(|(m, s)| (m.to_string(), s))
-                        .collect()
-                })
+                .get_existing_zset(&argv[1])
+                .map(|z| owned(z.range_by_score(min, max)))
                 .unwrap_or_default();
             if reversed {
                 pairs.reverse();
             }
-            reply_list(conn, member_score_lines(&pairs));
+            Ok(pairs_reply(pairs, scores))
+        }
+
+        "ZCOUNT" => {
+            exact_args(argv, name, 3)?;
+            let (min, max) = score_bounds(&argv[2], &argv[3])?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let count = app
+                .store
+                .get_existing_zset(&argv[1])
+                .map_or(0, |z| z.count_by_score(min, max));
+            Ok(Reply::Integer(count as i64))
+        }
+
+        "ZREMRANGEBYSCORE" => {
+            exact_args(argv, name, 3)?;
+            let (min, max) = score_bounds(&argv[2], &argv[3])?;
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let removed = app
+                .store
+                .get_existing_zset(&argv[1])
+                .map_or(0, |z| z.remove_range_by_score(min, max));
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::Integer(removed as i64))
         }
 
         "ZREMRANGEBYRANK" => {
-            let key = next_token(&mut rest);
-            let start = next_token(&mut rest).and_then(parse_long);
-            let stop = parse_long(trim(rest));
-            let (key, start, stop) = match (key, start, stop) {
-                (Some(k), Some(s), Some(e)) => (k, s, e),
-                _ => return usage(conn, "ZREMRANGEBYRANK key start stop"),
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
+            exact_args(argv, name, 3)?;
+            let (start, stop) = (parse_int(&argv[2])?, parse_int(&argv[3])?);
+            check_type(app, &argv[1], StoreType::Zset)?;
             let removed = app
                 .store
-                .get_existing_zset(key)
+                .get_existing_zset(&argv[1])
                 .map_or(0, |z| z.remove_range_by_rank(start, stop));
-            app.store.delete_if_empty(key);
-            conn.reply(&format!("REMOVED {}\r\n", removed));
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::Integer(removed as i64))
         }
 
         "ZPOPMIN" | "ZPOPMAX" => {
-            let key = next_token(&mut rest);
-            let count = match trim(rest) {
-                "" => 1,
-                text => match parse_long(text).filter(|&c| c >= 0) {
-                    Some(c) => c as usize,
-                    None => return usage(conn, &format!("{} key [count]", cmd)),
+            min_args(argv, name, 1)?;
+            let count = match argv.len() {
+                2 => None,
+                3 => match parse_int(&argv[2])? {
+                    c if c >= 0 => Some(c as usize),
+                    _ => return Ok(Reply::error("ERR value is out of range, must be positive")),
                 },
+                _ => return Err(Reply::wrong_arity(name)),
             };
-            let Some(key) = key else {
-                return usage(conn, &format!("{} key [count]", cmd));
-            };
-            if !check_type(app, conn, key, StoreType::Zset) {
-                return;
-            }
-            let popped = app
+            check_type(app, &argv[1], StoreType::Zset)?;
+            let mut popped = app
                 .store
-                .get_existing_zset(key)
-                .map(|z| z.pop(count, cmd == "ZPOPMAX"))
+                .get_existing_zset(&argv[1])
+                .map(|z| z.pop(count.unwrap_or(1), name == "ZPOPMAX"))
                 .unwrap_or_default();
-            app.store.delete_if_empty(key);
-            reply_list(conn, member_score_lines(&popped));
+            app.store.delete_if_empty(&argv[1]);
+            Ok(match count {
+                // Without a count Redis replies with the single member
+                // and its score side by side, not as a nested pair.
+                None => match popped.pop() {
+                    Some((member, score)) => {
+                        Reply::array(vec![Reply::Bulk(member), Reply::Double(score)])
+                    }
+                    None => Reply::array(Vec::new()),
+                },
+                Some(_) => Reply::ScoredMembers(popped),
+            })
         }
 
-        _ => conn.reply("ERR unknown command\r\n"),
+        _ => Ok(Reply::error("ERR unknown command")),
     }
 }
 
-const ZADD_USAGE: &str = "ZADD key score member [score member ...]";
-
-fn zadd(app: &mut App, conn: &mut Conn, rest: &str) {
-    let mut rest = rest;
-    let key = next_token(&mut rest);
-
-    let mut pairs: Vec<(f64, &str)> = Vec::new();
-    while let Some(score_text) = next_token(&mut rest) {
-        if pairs.len() == app.config.zadd_max_pairs {
-            return conn.reply("ERR too many score/member pairs\r\n");
-        }
-        match (parse_double(score_text), next_token(&mut rest)) {
-            (Some(score), Some(member)) => pairs.push((score, member)),
-            _ => return usage(conn, ZADD_USAGE),
-        }
+/// `ZADD key score member [score member ...]`
+fn zadd(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
+    min_args(argv, "ZADD", 3)?;
+    let rest = &argv[2..];
+    if !rest.len().is_multiple_of(2) {
+        return Err(syntax_error());
+    }
+    if rest.len() / 2 > app.config.zadd_max_pairs {
+        return Err(Reply::error("ERR too many score/member pairs"));
     }
 
-    let (Some(key), false) = (key, pairs.is_empty()) else {
-        return usage(conn, ZADD_USAGE);
-    };
-    if !check_type(app, conn, key, StoreType::Zset) {
-        return;
+    // Parse every score before touching the keyspace, so a bad score
+    // late in the list can't leave a half-applied ZADD behind.
+    let mut pairs = Vec::with_capacity(rest.len() / 2);
+    for pair in rest.chunks(2) {
+        pairs.push((parse_float(&pair[0])?, &pair[1]));
     }
-    let zset = app.store.get_or_create_zset(key).expect("type checked");
+
+    check_type(app, &argv[1], StoreType::Zset)?;
+    let zset = app
+        .store
+        .get_or_create_zset(&argv[1])
+        .expect("type checked");
     let added = pairs
         .iter()
         .filter(|(score, member)| zset.add(member, *score))
         .count();
-    conn.reply(&format!("ADDED {}\r\n", added));
+    Ok(Reply::Integer(added as i64))
 }

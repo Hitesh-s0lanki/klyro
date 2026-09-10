@@ -1,32 +1,33 @@
-//! INFO, CONFIG, and the config file.
+//! INFO, CONFIG, the config file, and HELLO's protocol negotiation.
 
 mod common;
 
-use common::{lines_before_terminator, KlyroServer};
+use common::{bulk, int, ok, KlyroServer, Value};
 
-/// Pulls `key:value` out of an INFO reply.
-fn field<'a>(reply: &'a str, key: &str) -> &'a str {
+/// Pulls `key:value` out of an INFO reply, which is one bulk string.
+fn field(reply: &Value, key: &str) -> String {
+    let body = reply.text();
     let prefix = format!("{}:", key);
-    lines_before_terminator(reply, "END")
-        .into_iter()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("no {key:?} line in {reply:?}"))
+    body.lines()
+        .find_map(|line| line.trim_end().strip_prefix(&prefix).map(str::to_string))
+        .unwrap_or_else(|| panic!("no {key:?} line in {body:?}"))
 }
 
-/// Pulls a parameter's value out of a CONFIG GET reply.
-fn parameter<'a>(reply: &'a str, name: &str) -> &'a str {
-    let prefix = format!("{} ", name);
-    lines_before_terminator(reply, "END")
+/// Pulls a parameter out of a CONFIG GET reply.
+fn parameter(reply: &Value, name: &str) -> String {
+    reply
+        .pairs()
         .into_iter()
-        .find_map(|line| line.strip_prefix(&prefix))
+        .find(|(key, _)| key == name)
         .unwrap_or_else(|| panic!("no {name:?} in {reply:?}"))
+        .1
 }
 
 #[test]
 fn info_prints_every_section() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    let reply = client.send("INFO");
+    let body = client.send("INFO").text();
     for header in [
         "# Server",
         "# Clients",
@@ -35,7 +36,7 @@ fn info_prints_every_section() {
         "# Stats",
         "# Keyspace",
     ] {
-        assert!(reply.contains(header), "no {header:?} in {reply:?}");
+        assert!(body.contains(header), "no {header:?} in {body:?}");
     }
 }
 
@@ -44,16 +45,17 @@ fn info_takes_a_single_section() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     let reply = client.send("INFO memory");
-    assert!(reply.contains("# Memory"));
-    assert!(!reply.contains("# Server"));
+    assert!(reply.text().contains("# Memory"));
+    assert!(!reply.text().contains("# Server"));
     assert!(field(&reply, "used_memory").parse::<u64>().unwrap() > 0);
 }
 
 #[test]
-fn info_rejects_an_unknown_section() {
+fn info_answers_an_unknown_section_with_an_empty_string() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert!(client.send("INFO nonsense").starts_with("ERR usage:"));
+    // Redis returns an empty body rather than an error.
+    assert_eq!(client.send("INFO nonsense"), bulk(""));
 }
 
 #[test]
@@ -63,6 +65,8 @@ fn info_reports_the_configured_port_and_a_running_uptime() {
     let reply = client.send("INFO server");
     assert_eq!(field(&reply, "tcp_port"), server.port.to_string());
     assert!(field(&reply, "uptime_in_seconds").parse::<u64>().is_ok());
+    // Client libraries gate features on redis_version.
+    assert!(!field(&reply, "redis_version").is_empty());
 }
 
 #[test]
@@ -71,9 +75,11 @@ fn info_counts_commands() {
     let mut client = server.connect();
     client.send("PING");
     client.send("PING");
-    let reply = client.send("INFO stats");
     // The two PINGs plus this INFO.
-    assert_eq!(field(&reply, "total_commands_processed"), "3");
+    assert_eq!(
+        field(&client.send("INFO stats"), "total_commands_processed"),
+        "3"
+    );
 }
 
 #[test]
@@ -140,7 +146,10 @@ fn info_keyspace_breaks_down_by_type() {
     client.send("SET vol v EX 100");
 
     let reply = client.send("INFO keyspace");
-    assert!(reply.contains("db0:keys=7,expires=1"), "got {reply:?}");
+    assert!(
+        reply.text().contains("db0:keys=7,expires=1"),
+        "got {reply:?}"
+    );
     assert_eq!(field(&reply, "string"), "3");
     assert_eq!(field(&reply, "list"), "1");
     assert_eq!(field(&reply, "hash"), "1");
@@ -172,26 +181,34 @@ fn config_get_lists_everything_and_supports_globs() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     let reply = client.send("CONFIG GET *");
-    assert_eq!(lines_before_terminator(&reply, "END").len(), 9);
+    assert_eq!(reply.pairs().len(), 11);
     assert_eq!(parameter(&reply, "port"), server.port.to_string());
 
     let reply = client.send("CONFIG GET save*");
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["save-interval 60"]
+        reply.pairs(),
+        vec![("save-interval".to_string(), "60".to_string())]
     );
+    assert_eq!(client.send("CONFIG GET nomatch"), Value::Array(vec![]));
+}
 
-    let reply = client.send("CONFIG GET nomatch");
-    assert!(lines_before_terminator(&reply, "END").is_empty());
+#[test]
+fn config_get_accepts_several_patterns() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    let reply = client.send("CONFIG GET maxclients dbfilename");
+    assert_eq!(reply.pairs().len(), 2);
 }
 
 #[test]
 fn config_set_changes_a_parameter() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("CONFIG SET maxclients 128"), "OK\r\n");
-    let reply = client.send("CONFIG GET maxclients");
-    assert_eq!(parameter(&reply, "maxclients"), "128");
+    assert_eq!(client.send("CONFIG SET maxclients 128"), ok());
+    assert_eq!(
+        parameter(&client.send("CONFIG GET maxclients"), "maxclients"),
+        "128"
+    );
     // INFO reads the same value, so the two can't disagree.
     assert_eq!(field(&client.send("INFO clients"), "maxclients"), "128");
 }
@@ -200,29 +217,29 @@ fn config_set_changes_a_parameter() {
 fn config_set_refuses_immutable_unknown_and_invalid() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(
-        client.send("CONFIG SET port 1234"),
-        "ERR parameter cannot be changed at runtime `port`\r\n"
-    );
-    assert_eq!(
-        client.send("CONFIG SET bind 127.0.0.1"),
-        "ERR parameter cannot be changed at runtime `bind`\r\n"
-    );
-    assert_eq!(
-        client.send("CONFIG SET nonsense 1"),
-        "ERR unknown parameter `nonsense`\r\n"
-    );
-    assert_eq!(
-        client.send("CONFIG SET maxclients 0"),
-        "ERR invalid value for parameter `maxclients`\r\n"
-    );
+    assert!(client
+        .send("CONFIG SET port 1234")
+        .error()
+        .contains("cannot be changed at runtime"));
+    assert!(client
+        .send("CONFIG SET bind 127.0.0.1")
+        .error()
+        .contains("cannot be changed at runtime"));
+    assert!(client
+        .send("CONFIG SET nonsense 1")
+        .error()
+        .contains("Unknown option"));
+    assert!(client
+        .send("CONFIG SET maxclients 0")
+        .error()
+        .contains("invalid value"));
 }
 
 #[test]
-fn config_names_are_case_insensitive() {
+fn config_names_and_subcommands_are_case_insensitive() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    assert_eq!(client.send("CONFIG SET MAXCLIENTS 55"), "OK\r\n");
+    assert_eq!(client.send("config set MAXCLIENTS 55"), ok());
     assert_eq!(
         parameter(&client.send("CONFIG GET maxclients"), "maxclients"),
         "55"
@@ -233,14 +250,10 @@ fn config_names_are_case_insensitive() {
 fn config_usage_errors() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    for cmd in [
-        "CONFIG",
-        "CONFIG NONSENSE",
-        "CONFIG GET",
-        "CONFIG SET maxclients",
-    ] {
-        assert!(client.send(cmd).starts_with("ERR usage:"), "for {cmd}");
-    }
+    assert!(client.send("CONFIG").is_error());
+    assert!(client.send("CONFIG NONSENSE").is_error());
+    assert!(client.send("CONFIG GET").is_error());
+    assert!(client.send("CONFIG SET maxclients").is_error());
 }
 
 #[test]
@@ -249,7 +262,7 @@ fn config_resetstat_clears_the_counters() {
     let mut client = server.connect();
     client.send("SET k v");
     client.send("GET k");
-    assert_eq!(client.send("CONFIG RESETSTAT"), "OK\r\n");
+    assert_eq!(client.send("CONFIG RESETSTAT"), ok());
     let reply = client.send("INFO stats");
     assert_eq!(field(&reply, "keyspace_hits"), "0");
     assert_eq!(field(&reply, "total_connections_received"), "0");
@@ -263,11 +276,11 @@ fn max_string_bytes_is_enforced_at_the_configured_size() {
     let mut client = server.connect();
     client.send("CONFIG SET max-string-bytes 16");
     client.send("SET k 0123456789");
-    assert_eq!(
-        client.send("APPEND k 0123456789"),
-        "ERR resulting string too long\r\n"
-    );
-    assert_eq!(client.send("APPEND k 12345"), "LEN 15\r\n");
+    assert!(client
+        .send("APPEND k 0123456789")
+        .error()
+        .contains("exceeds maximum allowed size"));
+    assert_eq!(client.send("APPEND k 12345"), int(15));
 }
 
 #[test]
@@ -277,8 +290,8 @@ fn scan_default_count_is_configurable() {
     client.send("MSET a 1 b 2 c 3 d 4 e 5");
     client.send("CONFIG SET scan-default-count 2");
     let reply = client.send("SCAN 0");
-    assert_eq!(reply.lines().count(), 3); // two keys plus the CURSOR line
-    assert!(reply.ends_with("CURSOR 2\r\n"), "got {reply:?}");
+    assert_eq!(reply.items()[0].text(), "2");
+    assert_eq!(reply.items()[1].items().len(), 2);
 }
 
 #[test]
@@ -286,11 +299,11 @@ fn zadd_max_pairs_is_configurable() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     client.send("CONFIG SET zadd-max-pairs 2");
-    assert_eq!(client.send("ZADD z 1 a 2 b"), "ADDED 2\r\n");
-    assert_eq!(
-        client.send("ZADD z 1 a 2 b 3 c"),
-        "ERR too many score/member pairs\r\n"
-    );
+    assert_eq!(client.send("ZADD z 1 a 2 b"), int(2));
+    assert!(client
+        .send("ZADD z 1 a 2 b 3 c")
+        .error()
+        .contains("too many score/member pairs"));
 }
 
 #[test]
@@ -301,8 +314,8 @@ fn dbfilename_redirects_the_next_save() {
     let _ = std::fs::remove_file(&redirected);
 
     client.send("SET k v");
-    client.send(&format!("CONFIG SET dbfilename {}", redirected.display()));
-    assert_eq!(client.send("SAVE"), "OK\r\n");
+    client.call(&["CONFIG", "SET", "dbfilename", &redirected.to_string_lossy()]);
+    assert_eq!(client.send("SAVE"), ok());
 
     assert!(redirected.exists(), "the save did not follow dbfilename");
     let _ = std::fs::remove_file(&redirected);
@@ -352,15 +365,46 @@ fn a_missing_config_file_stops_startup() {
 
 #[test]
 fn positional_port_and_dump_arguments_still_work() {
-    // The whole existing test suite relies on this form, but assert it
-    // directly so the compatibility is not just implied.
     let server = KlyroServer::new();
     let mut client = server.connect();
-    let reply = client.send("CONFIG GET port");
+    let reply = client.send("CONFIG GET port dbfilename");
     assert_eq!(parameter(&reply, "port"), server.port.to_string());
-    let reply = client.send("CONFIG GET dbfilename");
     assert_eq!(
         parameter(&reply, "dbfilename"),
         server.dump_path.to_string_lossy()
     );
+}
+
+#[test]
+fn hello_reports_the_server_and_protocol() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    let reply = client.send("HELLO");
+    let fields = reply.pairs();
+    assert!(fields.contains(&("server".to_string(), "klyro".to_string())));
+    assert!(fields.contains(&("proto".to_string(), "2".to_string())));
+}
+
+#[test]
+fn hello_negotiates_resp3_and_switches_the_encoding() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("HSET h a 1");
+
+    // Over RESP2 a hash comes back as a flat array.
+    assert_eq!(client.send("HGETALL h").items().len(), 2);
+
+    assert_eq!(client.send("HELLO 3").pairs().len(), 7);
+    // The test client parses a RESP3 map as an array of its elements,
+    // which is enough to show the marker changed - the redis-py checks
+    // cover the semantics.
+    let raw = client.send_raw(b"*2\r\n$7\r\nHGETALL\r\n$1\r\nh\r\n");
+    assert_eq!(raw.items().len(), 2);
+}
+
+#[test]
+fn hello_refuses_a_protocol_it_does_not_speak() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    assert!(client.send("HELLO 4").error().starts_with("NOPROTO"));
 }

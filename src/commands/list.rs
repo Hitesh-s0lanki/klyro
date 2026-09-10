@@ -1,11 +1,11 @@
 //! List commands.
 
-use super::{check_type, remaining_tokens, reply_list, usage};
+use super::{check_type, exact_args, min_args, parse_int, syntax_error, Checked};
 use crate::app::App;
-use crate::server::Conn;
+use crate::resp::Reply;
 use crate::store::StoreType;
 use crate::types::list;
-use crate::util::strutil::{next_token, parse_long, trim};
+use crate::util::bytes::{eq_ignore_case, Bytes};
 
 /// Which end of a list an operation works on.
 #[derive(Clone, Copy, PartialEq)]
@@ -15,82 +15,79 @@ enum End {
 }
 
 impl End {
-    fn parse(token: &str) -> Option<End> {
-        match token.to_ascii_uppercase().as_str() {
-            "LEFT" => Some(End::Left),
-            "RIGHT" => Some(End::Right),
-            _ => None,
+    fn parse(token: &[u8]) -> Option<End> {
+        if eq_ignore_case(token, "LEFT") {
+            Some(End::Left)
+        } else if eq_ignore_case(token, "RIGHT") {
+            Some(End::Right)
+        } else {
+            None
         }
     }
 }
 
-fn pop_from(l: &mut list::List, end: End) -> Option<String> {
+fn pop_from(l: &mut list::List, end: End) -> Option<Bytes> {
     match end {
         End::Left => l.pop_front(),
         End::Right => l.pop_back(),
     }
 }
 
-fn push_to(l: &mut list::List, end: End, value: String) {
+fn push_to(l: &mut list::List, end: End, value: Bytes) {
     match end {
         End::Left => l.push_front(value),
         End::Right => l.push_back(value),
     }
 }
 
-pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
-    let mut rest = rest;
+pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Reply {
+    match handle(app, name, argv) {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
 
-    match cmd {
+fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
+    match name {
         "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" => {
-            let only_if_exists = cmd.ends_with('X');
-            let end = if cmd.starts_with('L') {
+            min_args(argv, name, 2)?;
+            let key = &argv[1];
+            let end = if name.starts_with('L') {
                 End::Left
             } else {
                 End::Right
             };
-            let key = next_token(&mut rest);
-            let values = remaining_tokens(&mut rest);
-            let (key, values) = match key {
-                Some(k) if !values.is_empty() => (k, values),
-                _ => return usage(conn, &format!("{} key value [value ...]", cmd)),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
-            if only_if_exists && !app.store.exists(key) {
-                return conn.reply("NOT_FOUND\r\n");
+            check_type(app, key, StoreType::List)?;
+            if name.ends_with('X') && !app.store.exists(key) {
+                return Ok(Reply::Integer(0));
             }
             let l = app.store.get_or_create_list(key).expect("type checked");
-            for value in values {
-                push_to(l, end, value.to_string());
+            for value in &argv[2..] {
+                push_to(l, end, value.clone());
             }
-            conn.reply(&format!("LEN {}\r\n", l.len()));
+            Ok(Reply::Integer(l.len() as i64))
         }
 
         "LPOP" | "RPOP" => {
-            let end = if cmd == "LPOP" { End::Left } else { End::Right };
-            let key = next_token(&mut rest);
-            let count = match trim(rest) {
-                "" => None,
-                text => match parse_long(text).filter(|&c| c >= 0) {
-                    Some(c) => Some(c as usize),
-                    None => return usage(conn, &format!("{} key [count]", cmd)),
+            min_args(argv, name, 1)?;
+            let key = &argv[1];
+            let end = if name == "LPOP" {
+                End::Left
+            } else {
+                End::Right
+            };
+            let count = match argv.len() {
+                2 => None,
+                3 => match parse_int(&argv[2])? {
+                    c if c >= 0 => Some(c as usize),
+                    _ => return Ok(Reply::error("ERR value is out of range, must be positive")),
                 },
+                _ => return Err(Reply::wrong_arity(name)),
             };
-            let Some(key) = key else {
-                return usage(conn, &format!("{} key [count]", cmd));
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
+            check_type(app, key, StoreType::List)?;
 
-            // Without a count this replies with a single value, the
-            // shape it has always had; with one it replies as a list.
-            let wanted = count.unwrap_or(1);
             let mut popped = Vec::new();
             if let Some(l) = app.store.get_existing_list(key) {
-                for _ in 0..wanted {
+                for _ in 0..count.unwrap_or(1) {
                     match pop_from(l, end) {
                         Some(v) => popped.push(v),
                         None => break,
@@ -99,186 +96,132 @@ pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
             }
             app.store.delete_if_empty(key);
 
-            match count {
-                Some(_) => reply_list(conn, popped),
-                None => match popped.first() {
-                    Some(v) => conn.reply(&format!("VALUE {}\r\n", v)),
-                    None => conn.reply("NOT_FOUND\r\n"),
-                },
-            }
+            Ok(match count {
+                // Without a count: one value, or nil. With one: an
+                // array, or a nil array when the key is missing.
+                None => popped.into_iter().next().map_or(Reply::Nil, Reply::Bulk),
+                Some(_) if popped.is_empty() => Reply::NilArray,
+                Some(_) => Reply::bulk_array(popped),
+            })
         }
 
         "LLEN" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "LLEN key");
-            }
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
-            let len = app.store.get_existing_list(key).map_or(0, |l| l.len());
-            conn.reply(&format!("LEN {}\r\n", len));
+            exact_args(argv, name, 1)?;
+            check_type(app, &argv[1], StoreType::List)?;
+            let len = app.store.get_existing_list(&argv[1]).map_or(0, |l| l.len());
+            Ok(Reply::Integer(len as i64))
         }
 
         "LRANGE" => {
-            let key = next_token(&mut rest);
-            let start = next_token(&mut rest).and_then(parse_long);
-            let stop = parse_long(trim(rest));
-            let (key, start, stop) = match (key, start, stop) {
-                (Some(k), Some(s), Some(e)) => (k, s, e),
-                _ => return usage(conn, "LRANGE key start stop"),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
-            let values: Vec<String> = app
+            exact_args(argv, name, 3)?;
+            let (start, stop) = (parse_int(&argv[2])?, parse_int(&argv[3])?);
+            check_type(app, &argv[1], StoreType::List)?;
+            let values: Vec<Bytes> = app
                 .store
-                .get_existing_list(key)
+                .get_existing_list(&argv[1])
                 .map(|l| {
                     list::range(l, start, stop)
                         .into_iter()
-                        .map(str::to_string)
+                        .map(<[u8]>::to_vec)
                         .collect()
                 })
                 .unwrap_or_default();
-            reply_list(conn, values);
+            Ok(Reply::bulk_array(values))
         }
 
         "LINDEX" => {
-            let key = next_token(&mut rest);
-            let index = parse_long(trim(rest));
-            let (key, index) = match (key, index) {
-                (Some(k), Some(i)) => (k, i),
-                _ => return usage(conn, "LINDEX key index"),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
+            exact_args(argv, name, 2)?;
+            let index = parse_int(&argv[2])?;
+            check_type(app, &argv[1], StoreType::List)?;
             let value = app
                 .store
-                .get_existing_list(key)
+                .get_existing_list(&argv[1])
                 .and_then(|l| list::resolve_index(l.len(), index).and_then(|i| l.get(i).cloned()));
-            match value {
-                Some(v) => conn.reply(&format!("VALUE {}\r\n", v)),
-                None => conn.reply("NOT_FOUND\r\n"),
-            }
+            Ok(value.map_or(Reply::Nil, Reply::Bulk))
         }
 
         "LSET" => {
-            let key = next_token(&mut rest);
-            let index = next_token(&mut rest).and_then(parse_long);
-            let value = rest;
-            let (key, index) = match (key, index) {
-                (Some(k), Some(i)) if !value.is_empty() => (k, i),
-                _ => return usage(conn, "LSET key index value"),
+            exact_args(argv, name, 3)?;
+            let index = parse_int(&argv[2])?;
+            check_type(app, &argv[1], StoreType::List)?;
+            let Some(l) = app.store.get_existing_list(&argv[1]) else {
+                return Ok(Reply::error("ERR no such key"));
             };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
+            match list::resolve_index(l.len(), index) {
+                Some(i) => {
+                    l[i] = argv[3].clone();
+                    Ok(Reply::ok())
+                }
+                None => Ok(Reply::error("ERR index out of range")),
             }
-            let updated = app
-                .store
-                .get_existing_list(key)
-                .and_then(|l| list::resolve_index(l.len(), index).map(|i| l[i] = value.to_string()))
-                .is_some();
-            // NOT_FOUND covers a missing key and an out-of-range index.
-            super::reply_ok_or_missing(conn, updated);
         }
 
         "LINSERT" => {
-            let key = next_token(&mut rest);
-            let position = next_token(&mut rest);
-            let pivot = next_token(&mut rest);
-            let value = rest;
-            let (key, position, pivot) = match (key, position, pivot) {
-                (Some(k), Some(p), Some(v)) if !value.is_empty() => (k, p, v),
-                _ => return usage(conn, "LINSERT key BEFORE|AFTER pivot value"),
+            exact_args(argv, name, 4)?;
+            let before = if eq_ignore_case(&argv[2], "BEFORE") {
+                true
+            } else if eq_ignore_case(&argv[2], "AFTER") {
+                false
+            } else {
+                return Err(syntax_error());
             };
-            let before = match position.to_ascii_uppercase().as_str() {
-                "BEFORE" => true,
-                "AFTER" => false,
-                _ => return usage(conn, "LINSERT key BEFORE|AFTER pivot value"),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
+            check_type(app, &argv[1], StoreType::List)?;
             let new_len = app
                 .store
-                .get_existing_list(key)
-                .and_then(|l| list::insert(l, before, pivot, value));
-            match new_len {
-                Some(len) => conn.reply(&format!("LEN {}\r\n", len)),
-                None => conn.reply("NOT_FOUND\r\n"),
-            }
+                .get_existing_list(&argv[1])
+                .and_then(|l| list::insert(l, before, &argv[3], &argv[4]));
+            // -1 means the pivot is absent; 0 means the key is.
+            Ok(Reply::Integer(match new_len {
+                Some(len) => len as i64,
+                None if app.store.exists(&argv[1]) => -1,
+                None => 0,
+            }))
         }
 
         "LREM" => {
-            let key = next_token(&mut rest);
-            let count = next_token(&mut rest).and_then(parse_long);
-            let value = rest;
-            let (key, count) = match (key, count) {
-                (Some(k), Some(c)) if !value.is_empty() => (k, c),
-                _ => return usage(conn, "LREM key count value"),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
+            exact_args(argv, name, 3)?;
+            let count = parse_int(&argv[2])?;
+            check_type(app, &argv[1], StoreType::List)?;
             let removed = app
                 .store
-                .get_existing_list(key)
-                .map_or(0, |l| list::remove(l, count, value));
-            app.store.delete_if_empty(key);
-            conn.reply(&format!("REMOVED {}\r\n", removed));
+                .get_existing_list(&argv[1])
+                .map_or(0, |l| list::remove(l, count, &argv[3]));
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::Integer(removed as i64))
         }
 
         "LTRIM" => {
-            let key = next_token(&mut rest);
-            let start = next_token(&mut rest).and_then(parse_long);
-            let stop = parse_long(trim(rest));
-            let (key, start, stop) = match (key, start, stop) {
-                (Some(k), Some(s), Some(e)) => (k, s, e),
-                _ => return usage(conn, "LTRIM key start stop"),
-            };
-            if !check_type(app, conn, key, StoreType::List) {
-                return;
-            }
-            if let Some(l) = app.store.get_existing_list(key) {
+            exact_args(argv, name, 3)?;
+            let (start, stop) = (parse_int(&argv[2])?, parse_int(&argv[3])?);
+            check_type(app, &argv[1], StoreType::List)?;
+            if let Some(l) = app.store.get_existing_list(&argv[1]) {
                 list::trim(l, start, stop);
             }
-            app.store.delete_if_empty(key);
-            conn.reply("OK\r\n");
+            app.store.delete_if_empty(&argv[1]);
+            Ok(Reply::ok())
         }
 
         "RPOPLPUSH" | "LMOVE" => {
-            let source = next_token(&mut rest);
-            let destination = next_token(&mut rest);
-            let (source, destination) = match (source, destination) {
-                (Some(s), Some(d)) => (s, d),
-                _ => return usage(conn, move_usage(cmd)),
-            };
-            // RPOPLPUSH is LMOVE with the ends fixed.
-            let (from, to) = if cmd == "RPOPLPUSH" {
+            let (from, to) = if name == "RPOPLPUSH" {
+                exact_args(argv, name, 2)?;
                 (End::Right, End::Left)
             } else {
-                match (
-                    next_token(&mut rest).and_then(End::parse),
-                    next_token(&mut rest).and_then(End::parse),
-                ) {
+                exact_args(argv, name, 4)?;
+                match (End::parse(&argv[3]), End::parse(&argv[4])) {
                     (Some(f), Some(t)) => (f, t),
-                    _ => return usage(conn, move_usage(cmd)),
+                    _ => return Err(syntax_error()),
                 }
             };
-            if !check_type(app, conn, source, StoreType::List)
-                || !check_type(app, conn, destination, StoreType::List)
-            {
-                return;
-            }
+            let (source, destination) = (&argv[1], &argv[2]);
+            check_type(app, source, StoreType::List)?;
+            check_type(app, destination, StoreType::List)?;
 
             let Some(value) = app
                 .store
                 .get_existing_list(source)
                 .and_then(|l| pop_from(l, from))
             else {
-                return conn.reply("NOT_FOUND\r\n");
+                return Ok(Reply::Nil);
             };
             // Rotating a list onto itself is legal, so push before the
             // empty-cleanup runs - otherwise a one-element self-move
@@ -289,17 +232,9 @@ pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
                 .expect("type checked");
             push_to(target, to, value.clone());
             app.store.delete_if_empty(source);
-            conn.reply(&format!("VALUE {}\r\n", value));
+            Ok(Reply::Bulk(value))
         }
 
-        _ => conn.reply("ERR unknown command\r\n"),
-    }
-}
-
-fn move_usage(cmd: &str) -> &'static str {
-    if cmd == "RPOPLPUSH" {
-        "RPOPLPUSH source destination"
-    } else {
-        "LMOVE source destination LEFT|RIGHT LEFT|RIGHT"
+        _ => Ok(Reply::error("ERR unknown command")),
     }
 }

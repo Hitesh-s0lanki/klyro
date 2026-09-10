@@ -11,12 +11,15 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 
 ## Protocol & transport
 
-- **Text line protocol, not RESP.** Values can't contain `\n`, single
-  replies are capped at 64 KiB, no binary-safety — a real client
-  library couldn't talk to it, only a raw TCP client (`nc`/telnet).
+- ~~Text line protocol, not RESP~~ **Done (2026-09-10).** Klyro speaks
+  RESP2 and RESP3. Values are binary-safe, replies are never silently
+  truncated, and redis-py, go-redis, and ioredis all work unmodified.
+  See [resp-protocol.md](resp-protocol.md).
 - No transactions (`MULTI`/`EXEC`).
 - No pub/sub (`SUBSCRIBE`/`PUBLISH`).
-- No official client library or CLI (`klyro-cli`).
+- ~~No official client library or CLI~~ **Moot (2026-09-10).** Any
+  Redis client works, `redis-cli` included, so the three hand-written
+  clients were retired. See [client-libraries.md](client-libraries.md).
 
 ## Data model
 
@@ -28,9 +31,9 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
   access and trimming, the hash ergonomics, the set algebra, and sorted
   set ranks and score ranges. See
   [redis-feature-gap.md](redis-feature-gap.md) for what remains.
-- `LPUSH`/`RPUSH`/`SADD`/`ZADD` values must be single tokens (no
-  embedded spaces) so multiple values per call stay unambiguous - a
-  value with spaces has to go through `SET`/`HSET` instead.
+- ~~Values must be single tokens~~ **Done (2026-09-10).** RESP
+  length-prefixes every argument, so any value may contain spaces,
+  newlines, or NUL bytes.
 - ~~No key pattern matching~~ **Done (2026-09-09).** `KEYS pattern` and
   `SCAN cursor [MATCH pattern] [COUNT count]` are in - see the README's
   generic command table. No `EXPIRE NX/XX` flags still.
@@ -79,10 +82,10 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 ## Software engineering
 
 - ~~No automated test suite~~ **Done (2026-09-09, extended
-  2026-09-10).** See [tests/](../tests/) and `cargo test` — 260 tests
+  2026-09-10).** See [tests/](../tests/) and `cargo test` — 248 tests
   covering every command, WRONGTYPE, multi-value push/add,
-  `KEYS`/`SCAN` pattern matching, INFO/CONFIG, config-file loading, and
-  a full persistence round-trip.
+  `KEYS`/`SCAN` pattern matching, INFO/CONFIG, config-file loading,
+  RESP framing, and a full persistence round-trip.
   Still no CI (nothing runs `cargo test` automatically on push).
 - No license file.
 
@@ -93,16 +96,13 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 3. ~~**`SCAN`/`KEYS pattern`**~~ Done — see above.
 4. ~~**Command coverage**~~ Done - see above.
 5. ~~**`INFO`/`CONFIG` plus a config file**~~ Done - see above.
-6. **Values with embedded spaces in List/Set/Zset** - would need a
-   protocol change (e.g. quoting or length-prefixing), which is really
-   a stepping stone toward...
-7. **A binary-safe protocol (RESP-like)** - the biggest rewrite here;
-   touches `server.rs`'s read/parse loop and every command's argument
-   parsing. Also the fix for the silently truncated 64 KiB reply and for
-   `SET`'s suffix-matched option flags. Worth doing next, now that the
-   command set it would carry is broad.
-8. **Client library catch-up** - the Python/Node/Go clients still only
-   cover the original 39 commands. Best done after the protocol
-   settles, so the work isn't paid for twice.
-9. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
-   separable efforts; not blocking anything else on this list.
+6. ~~**Values with embedded spaces in List/Set/Zset**~~ Done - see
+   above.
+7. ~~**A binary-safe protocol (RESP-like)**~~ Done - see above.
+8. **Transactions (`MULTI`/`EXEC`/`WATCH`)** - now the top of the list.
+   The command layer already returns a reply value instead of writing to
+   a socket, which is most of what queuing a transaction needs.
+9. **Pub/sub, then blocking commands** - both need the event loop to
+   park and wake a connection, the one piece RESP did not bring.
+10. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
+    separable efforts; not blocking anything else on this list.

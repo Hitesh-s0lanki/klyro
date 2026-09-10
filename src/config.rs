@@ -48,6 +48,13 @@ pub struct Config {
     pub maxclients: usize,
     /// Ceiling on a stored string, enforced by APPEND and SETRANGE.
     pub max_string_bytes: usize,
+    /// Largest bulk string a client may send. A request over this is a
+    /// protocol error, which closes the connection.
+    pub proto_max_bulk_len: usize,
+    /// How much unsent reply may pile up for one client before the
+    /// connection is closed. The old line protocol silently truncated
+    /// instead, which returned a partial answer that looked complete.
+    pub client_output_buffer_limit: usize,
     /// The COUNT a SCAN uses when the caller doesn't give one.
     pub scan_default_count: usize,
     /// Ceiling on score/member pairs in a single ZADD.
@@ -63,7 +70,9 @@ impl Default for Config {
             save_interval: Duration::from_secs(60),
             sweep_interval: Duration::from_secs(1),
             maxclients: 10_000,
-            max_string_bytes: 64 * 1024,
+            max_string_bytes: 512 * 1024 * 1024,
+            proto_max_bulk_len: 512 * 1024 * 1024,
+            client_output_buffer_limit: 256 * 1024 * 1024,
             scan_default_count: 10,
             zadd_max_pairs: 128,
         }
@@ -79,6 +88,8 @@ pub const PARAMETERS: &[&str] = &[
     "sweep-interval",
     "maxclients",
     "max-string-bytes",
+    "proto-max-bulk-len",
+    "client-output-buffer-limit",
     "scan-default-count",
     "zadd-max-pairs",
 ];
@@ -104,6 +115,8 @@ impl Config {
             "sweep-interval" => self.sweep_interval.as_millis().to_string(),
             "maxclients" => self.maxclients.to_string(),
             "max-string-bytes" => self.max_string_bytes.to_string(),
+            "proto-max-bulk-len" => self.proto_max_bulk_len.to_string(),
+            "client-output-buffer-limit" => self.client_output_buffer_limit.to_string(),
             "scan-default-count" => self.scan_default_count.to_string(),
             "zadd-max-pairs" => self.zadd_max_pairs.to_string(),
             _ => return None,
@@ -157,6 +170,14 @@ impl Config {
             }
             "max-string-bytes" => {
                 self.max_string_bytes = positive(value)? as usize;
+                Ok(())
+            }
+            "proto-max-bulk-len" => {
+                self.proto_max_bulk_len = positive(value)? as usize;
+                Ok(())
+            }
+            "client-output-buffer-limit" => {
+                self.client_output_buffer_limit = positive(value)? as usize;
                 Ok(())
             }
             "scan-default-count" => {

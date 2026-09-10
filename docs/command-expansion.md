@@ -25,11 +25,17 @@ Plus variadic `DEL`, `HDEL`, `SREM`, and `ZREM`.
 
 ## Decisions
 
-### Backwards compatibility was a hard constraint
+### Backwards compatibility was a hard constraint — and then it wasn't
 
-Three client libraries in [../clients/](../clients/) parse exact reply
-strings, and 121 tests asserted them. Every existing reply shape was
-preserved, which shaped two choices:
+> **Superseded.** The RESP rewrite that followed
+> ([resp-protocol.md](resp-protocol.md)) changed every reply shape and
+> retired the three hand-written clients. The reasoning below is kept
+> because it explains why the command set looked the way it did in
+> between, not because it still holds.
+
+Three client libraries in `clients/` parsed exact reply strings, and 121
+tests asserted them. Every existing reply shape was preserved, which
+shaped two choices:
 
 - **Variadic commands kept their single-argument reply.** `DEL key`
   still answers `OK`/`NOT_FOUND`; only `DEL key key` switches to
@@ -44,8 +50,9 @@ All 121 original tests still pass unmodified.
 
 ### `SET`'s flags are matched as a trailing suffix
 
-This is the one genuinely awkward piece, and it is forced by the
-protocol rather than chosen.
+> **Superseded** by the RESP rewrite, which gave arguments real
+> boundaries. The episode is worth keeping for what the smoke test
+> caught.
 
 `SET key value` takes the whole rest of the line as the value, so values
 may contain spaces. Redis puts the option flags *after* the value
@@ -148,13 +155,14 @@ from it worth recording here:
   mistakes prints three lines and exits, rather than making the operator
   fix one, restart, and find the next.
 
-## Not done
+## What happened next
 
-The three client libraries still cover only the original 39 commands.
-They keep working, because every variadic extension preserved its
-single-argument reply, but none of the 68 new commands is reachable from
-Python, Node, or Go. Best done after the RESP rewrite so the work isn't
-paid for twice.
+The RESP rewrite landed immediately after this work and changed the
+protocol out from under it: every reply became a typed RESP value, the
+arity-dependent reply shapes were dropped for plain counts, `HSET`
+became variadic after all, and the client libraries were retired rather
+than caught up. See [resp-protocol.md](resp-protocol.md).
 
-There is also no `CONFIG REWRITE`, so a runtime `CONFIG SET` is not
-written back to the config file and does not survive a restart.
+Still missing from this area: `CONFIG REWRITE`, so a runtime
+`CONFIG SET` is not written back to the config file and does not survive
+a restart.

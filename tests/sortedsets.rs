@@ -1,11 +1,8 @@
-//! Sorted set commands added beyond ZADD/ZSCORE/ZREM/ZCARD/ZRANGE:
-//! ranks, score-range queries, incremental scoring, and the pops.
+//! Sorted set commands.
 
 mod common;
 
-use common::{lines_before_terminator, KlyroServer};
-
-const WRONGTYPE: &str = "ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+use common::{bulk, int, nil, KlyroServer, Value, WRONGTYPE};
 
 fn board(server: &KlyroServer) -> common::KlyroClient {
     let mut client = server.connect();
@@ -14,18 +11,73 @@ fn board(server: &KlyroServer) -> common::KlyroClient {
 }
 
 #[test]
-fn zrevrange_reads_from_the_top() {
+fn zadd_repositions_without_counting() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    assert_eq!(client.send("ZADD z 1 a"), int(1));
+    assert_eq!(client.send("ZADD z 9 a"), int(0));
+    assert_eq!(client.send("ZSCORE z a"), bulk("9"));
+    assert_eq!(client.send("ZCARD z"), int(1));
+}
+
+#[test]
+fn zadd_rejects_a_dangling_pair_and_a_bad_score() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    assert_eq!(client.send("ZADD z 1 a 2").error(), "ERR syntax error");
+    assert_eq!(
+        client.send("ZADD z notascore a").error(),
+        "ERR value is not a valid float"
+    );
+    // A bad score anywhere leaves the whole call unapplied.
+    assert_eq!(
+        client.send("ZADD z 1 a bad b").error(),
+        "ERR value is not a valid float"
+    );
+    assert_eq!(client.send("EXISTS z"), int(0));
+}
+
+#[test]
+fn zrange_is_ascending_and_zrevrange_descending() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    let reply = client.send("ZREVRANGE board 0 -1");
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["alice 100", "carol 75", "bob 50"]
+        client.send("ZRANGE board 0 -1").list(),
+        vec!["bob", "carol", "alice"]
     );
-    let reply = client.send("ZREVRANGE board 0 1");
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["alice 100", "carol 75"]
+        client.send("ZREVRANGE board 0 -1").list(),
+        vec!["alice", "carol", "bob"]
+    );
+    assert_eq!(
+        client.send("ZREVRANGE board 0 1").list(),
+        vec!["alice", "carol"]
+    );
+}
+
+#[test]
+fn withscores_interleaves_members_and_scores() {
+    let server = KlyroServer::new();
+    let mut client = board(&server);
+    assert_eq!(
+        client.send("ZRANGE board 0 -1 WITHSCORES").list(),
+        vec!["bob", "50", "carol", "75", "alice", "100"]
+    );
+    assert_eq!(
+        client.send("ZRANGE board 0 -1 BOGUS").error(),
+        "ERR syntax error"
+    );
+}
+
+#[test]
+fn zscore_and_zmscore() {
+    let server = KlyroServer::new();
+    let mut client = board(&server);
+    assert_eq!(client.send("ZSCORE board carol"), bulk("75"));
+    assert_eq!(client.send("ZSCORE board nobody"), nil());
+    assert_eq!(
+        client.send("ZMSCORE board alice nobody bob"),
+        Value::Array(vec![bulk("100"), nil(), bulk("50")])
     );
 }
 
@@ -33,67 +85,63 @@ fn zrevrange_reads_from_the_top() {
 fn zrank_and_zrevrank_count_from_each_end() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    assert_eq!(client.send("ZRANK board bob"), "RANK 0\r\n");
-    assert_eq!(client.send("ZRANK board alice"), "RANK 2\r\n");
-    assert_eq!(client.send("ZREVRANK board alice"), "RANK 0\r\n");
-    assert_eq!(client.send("ZREVRANK board bob"), "RANK 2\r\n");
-    assert_eq!(client.send("ZRANK board nobody"), "NOT_FOUND\r\n");
-    assert_eq!(client.send("ZRANK missing bob"), "NOT_FOUND\r\n");
+    assert_eq!(client.send("ZRANK board bob"), int(0));
+    assert_eq!(client.send("ZRANK board alice"), int(2));
+    assert_eq!(client.send("ZREVRANK board alice"), int(0));
+    assert_eq!(client.send("ZRANK board nobody"), nil());
+    assert_eq!(client.send("ZRANK missing bob"), nil());
 }
 
 #[test]
 fn zincrby_adjusts_a_score_and_reorders() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    assert_eq!(client.send("ZINCRBY board 60 bob"), "VALUE 110\r\n");
-    assert_eq!(client.send("ZREVRANK board bob"), "RANK 0\r\n");
+    assert_eq!(client.send("ZINCRBY board 60 bob"), bulk("110"));
+    assert_eq!(client.send("ZREVRANK board bob"), int(0));
     // A missing member starts from zero.
-    assert_eq!(client.send("ZINCRBY board 5 newcomer"), "VALUE 5\r\n");
-    assert_eq!(client.send("ZINCRBY board -5 newcomer"), "VALUE 0\r\n");
-}
-
-#[test]
-fn zmscore_reports_each_member() {
-    let server = KlyroServer::new();
-    let mut client = board(&server);
-    let reply = client.send("ZMSCORE board alice nobody bob");
-    assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["VALUE 100", "NOT_FOUND", "VALUE 50"]
-    );
+    assert_eq!(client.send("ZINCRBY board 5 newcomer"), bulk("5"));
+    assert_eq!(client.send("ZINCRBY board -5 newcomer"), bulk("0"));
 }
 
 #[test]
 fn zrangebyscore_selects_a_score_window() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    let reply = client.send("ZRANGEBYSCORE board 60 100");
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["carol 75", "alice 100"]
+        client.send("ZRANGEBYSCORE board 60 100").list(),
+        vec!["carol", "alice"]
     );
-    let reply = client.send("ZRANGEBYSCORE board -inf +inf");
-    assert_eq!(lines_before_terminator(&reply, "END").len(), 3);
+    assert_eq!(
+        client.send("ZRANGEBYSCORE board -inf +inf").items().len(),
+        3
+    );
+    assert_eq!(
+        client.send("ZRANGEBYSCORE board 60 100 WITHSCORES").list(),
+        vec!["carol", "75", "alice", "100"]
+    );
 }
 
 #[test]
-fn zrangebyscore_honors_exclusive_bounds() {
+fn zrangebyscore_honours_exclusive_bounds() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    let reply = client.send("ZRANGEBYSCORE board (75 +inf");
-    assert_eq!(lines_before_terminator(&reply, "END"), vec!["alice 100"]);
-    let reply = client.send("ZRANGEBYSCORE board 75 (100");
-    assert_eq!(lines_before_terminator(&reply, "END"), vec!["carol 75"]);
+    assert_eq!(
+        client.send("ZRANGEBYSCORE board (75 +inf").list(),
+        vec!["alice"]
+    );
+    assert_eq!(
+        client.send("ZRANGEBYSCORE board 75 (100").list(),
+        vec!["carol"]
+    );
 }
 
 #[test]
 fn zrevrangebyscore_takes_its_bounds_high_first() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    let reply = client.send("ZREVRANGEBYSCORE board 100 60");
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["alice 100", "carol 75"]
+        client.send("ZREVRANGEBYSCORE board 100 60").list(),
+        vec!["alice", "carol"]
     );
 }
 
@@ -101,37 +149,29 @@ fn zrevrangebyscore_takes_its_bounds_high_first() {
 fn zcount_counts_the_same_window() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    assert_eq!(client.send("ZCOUNT board -inf +inf"), "COUNT 3\r\n");
-    assert_eq!(client.send("ZCOUNT board 50 75"), "COUNT 2\r\n");
-    assert_eq!(client.send("ZCOUNT board (50 75"), "COUNT 1\r\n");
-    assert_eq!(client.send("ZCOUNT missing 0 100"), "COUNT 0\r\n");
+    assert_eq!(client.send("ZCOUNT board -inf +inf"), int(3));
+    assert_eq!(client.send("ZCOUNT board 50 75"), int(2));
+    assert_eq!(client.send("ZCOUNT board (50 75"), int(1));
+    assert_eq!(client.send("ZCOUNT missing 0 100"), int(0));
+    assert_eq!(
+        client.send("ZCOUNT board low high").error(),
+        "ERR min or max is not a float"
+    );
 }
 
 #[test]
-fn score_range_commands_reject_a_non_numeric_bound() {
+fn zremrange_by_rank_and_by_score() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    assert!(client
-        .send("ZCOUNT board low high")
-        .starts_with("ERR usage:"));
-}
+    assert_eq!(client.send("ZREMRANGEBYRANK board 0 1"), int(2));
+    assert_eq!(client.send("ZRANGE board 0 -1").list(), vec!["alice"]);
 
-#[test]
-fn zremrangebyrank_drops_a_rank_window() {
-    let server = KlyroServer::new();
     let mut client = board(&server);
-    assert_eq!(client.send("ZREMRANGEBYRANK board 0 1"), "REMOVED 2\r\n");
-    let reply = client.send("ZRANGE board 0 -1");
-    assert_eq!(lines_before_terminator(&reply, "END"), vec!["alice 100"]);
-}
-
-#[test]
-fn zremrangebyscore_drops_a_score_window() {
-    let server = KlyroServer::new();
-    let mut client = board(&server);
-    assert_eq!(client.send("ZREMRANGEBYSCORE board 60 90"), "REMOVED 1\r\n");
-    assert_eq!(client.send("ZSCORE board carol"), "NOT_FOUND\r\n");
-    assert_eq!(client.send("ZCARD board"), "LEN 2\r\n");
+    client.send("DEL board");
+    client.send("ZADD board 50 bob 75 carol 100 alice");
+    assert_eq!(client.send("ZREMRANGEBYSCORE board 60 90"), int(1));
+    assert_eq!(client.send("ZSCORE board carol"), nil());
+    assert_eq!(client.send("ZCARD board"), int(2));
 }
 
 #[test]
@@ -139,61 +179,65 @@ fn removing_every_member_deletes_the_key() {
     let server = KlyroServer::new();
     let mut client = board(&server);
     client.send("ZREMRANGEBYSCORE board -inf +inf");
-    assert_eq!(client.send("EXISTS board"), "COUNT 0\r\n");
+    assert_eq!(client.send("EXISTS board"), int(0));
+}
+
+#[test]
+fn zrem_counts_what_it_removed() {
+    let server = KlyroServer::new();
+    let mut client = board(&server);
+    assert_eq!(client.send("ZREM board bob"), int(1));
+    assert_eq!(client.send("ZREM board bob"), int(0));
+    assert_eq!(client.send("ZREM board carol alice nobody"), int(2));
+    assert_eq!(client.send("EXISTS board"), int(0));
 }
 
 #[test]
 fn zpopmin_and_zpopmax_take_from_each_end() {
     let server = KlyroServer::new();
     let mut client = board(&server);
-    let reply = client.send("ZPOPMIN board");
-    assert_eq!(lines_before_terminator(&reply, "END"), vec!["bob 50"]);
-    let reply = client.send("ZPOPMAX board 2");
+    // Without a count the member and its score come back side by side.
+    assert_eq!(client.send("ZPOPMIN board").list(), vec!["bob", "50"]);
     assert_eq!(
-        lines_before_terminator(&reply, "END"),
-        vec!["alice 100", "carol 75"]
+        client.send("ZPOPMAX board 2").list(),
+        vec!["alice", "100", "carol", "75"]
     );
-    assert_eq!(client.send("EXISTS board"), "COUNT 0\r\n");
+    assert_eq!(client.send("EXISTS board"), int(0));
+    assert_eq!(client.send("ZPOPMIN missing"), Value::Array(vec![]));
 }
 
 #[test]
-fn popping_a_missing_key_is_an_empty_reply() {
+fn scores_print_without_a_trailing_decimal_point() {
     let server = KlyroServer::new();
     let mut client = server.connect();
-    let reply = client.send("ZPOPMIN nope");
-    assert!(lines_before_terminator(&reply, "END").is_empty());
+    client.send("ZADD z 1 whole 2.5 fractional -3 negative");
+    assert_eq!(client.send("ZSCORE z whole"), bulk("1"));
+    assert_eq!(client.send("ZSCORE z fractional"), bulk("2.5"));
+    assert_eq!(client.send("ZSCORE z negative"), bulk("-3"));
 }
 
 #[test]
-fn zrem_keeps_its_single_member_reply_and_counts_multiples() {
-    let server = KlyroServer::new();
-    let mut client = board(&server);
-    assert_eq!(client.send("ZREM board bob"), "OK\r\n");
-    assert_eq!(client.send("ZREM board bob"), "NOT_FOUND\r\n");
-    assert_eq!(
-        client.send("ZREM board carol alice nobody"),
-        "DELETED 2\r\n"
-    );
-    assert_eq!(client.send("EXISTS board"), "COUNT 0\r\n");
-}
-
-#[test]
-fn new_zset_commands_reject_wrong_types() {
+fn zset_commands_reject_wrong_types() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     client.send("SET s v");
-    for cmd in [
+    for command in [
+        "ZADD s 1 m",
+        "ZSCORE s m",
+        "ZMSCORE s m",
+        "ZREM s m",
+        "ZCARD s",
         "ZRANK s m",
         "ZREVRANK s m",
+        "ZRANGE s 0 -1",
         "ZREVRANGE s 0 -1",
         "ZRANGEBYSCORE s 0 1",
         "ZCOUNT s 0 1",
         "ZINCRBY s 1 m",
-        "ZMSCORE s m",
         "ZPOPMIN s",
         "ZREMRANGEBYRANK s 0 1",
         "ZREMRANGEBYSCORE s 0 1",
     ] {
-        assert_eq!(client.send(cmd), WRONGTYPE, "for {cmd}");
+        assert_eq!(client.send(command).error(), WRONGTYPE, "for {command}");
     }
 }

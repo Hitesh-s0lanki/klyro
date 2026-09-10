@@ -3,11 +3,11 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{remaining_tokens, reply_list, reply_ok_or_missing, usage};
+use super::{exact_args, min_args, parse_int, syntax_error, Checked};
 use crate::app::App;
-use crate::server::Conn;
+use crate::resp::Reply;
+use crate::util::bytes::{eq_ignore_case, Bytes};
 use crate::util::glob::glob_match;
-use crate::util::strutil::{next_token, parse_long, trim};
 
 /// A deadline `millis` from now. A non-positive value lands in the past,
 /// which makes the key expire on its next lookup - the same thing Redis
@@ -31,217 +31,183 @@ fn deadline_at_unix_millis(millis: i64) -> SystemTime {
     }
 }
 
-/// Shared parsing for the four EXPIRE variants: one key, one number.
-/// `to_deadline` turns that number into an absolute instant.
-fn expire_variant(
-    app: &mut App,
-    conn: &mut Conn,
-    rest: &str,
-    spec: &str,
-    to_deadline: fn(i64) -> SystemTime,
-) {
-    let mut rest = rest;
-    let key = next_token(&mut rest);
-    let amount = parse_long(trim(rest));
-    let (key, amount) = match (key, amount) {
-        (Some(k), Some(n)) => (k, n),
-        _ => return usage(conn, spec),
-    };
-    let ok = app.store.set_expire_at(key, Some(to_deadline(amount)));
-    reply_ok_or_missing(conn, ok);
+pub fn dispatch(app: &mut App, name: &str, argv: &[Bytes]) -> Reply {
+    match handle(app, name, argv) {
+        Ok(reply) | Err(reply) => reply,
+    }
 }
 
-pub fn dispatch(app: &mut App, conn: &mut Conn, cmd: &str, rest: &str) {
-    let mut rest = rest;
-
-    match cmd {
-        // DEL/UNLINK stay backwards compatible: one key keeps the
-        // original OK/NOT_FOUND reply, several report a count instead.
+fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
+    match name {
         "DEL" | "UNLINK" => {
-            let keys = remaining_tokens(&mut rest);
-            match keys.len() {
-                0 => usage(conn, "DEL key [key ...]"),
-                1 => reply_ok_or_missing(conn, app.store.del(keys[0])),
-                _ => {
-                    let deleted = keys.iter().filter(|k| app.store.del(k)).count();
-                    conn.reply(&format!("DELETED {}\r\n", deleted));
-                }
-            }
+            min_args(argv, name, 1)?;
+            let deleted = argv[1..].iter().filter(|key| app.store.del(key)).count();
+            Ok(Reply::Integer(deleted as i64))
         }
 
         "EXISTS" => {
-            let keys = remaining_tokens(&mut rest);
-            if keys.is_empty() {
-                return usage(conn, "EXISTS key [key ...]");
-            }
-            // Redis counts each key it is given, so a repeated key
-            // that exists counts once per repetition.
-            let found = keys.iter().filter(|k| app.store.exists(k)).count();
-            conn.reply(&format!("COUNT {}\r\n", found));
+            min_args(argv, name, 1)?;
+            // Redis counts each key it is given, so a repeated key that
+            // exists counts once per repetition.
+            let found = argv[1..].iter().filter(|key| app.store.exists(key)).count();
+            Ok(Reply::Integer(found as i64))
         }
 
-        "EXPIRE" => expire_variant(app, conn, rest, "EXPIRE key seconds", |secs| {
+        "EXPIRE" => expire_variant(app, argv, name, |secs| {
             deadline_after_millis(secs.saturating_mul(1000))
         }),
-
-        "PEXPIRE" => expire_variant(app, conn, rest, "PEXPIRE key milliseconds", |ms| {
-            deadline_after_millis(ms)
-        }),
-
-        "EXPIREAT" => expire_variant(app, conn, rest, "EXPIREAT key unix-time-seconds", |secs| {
+        "PEXPIRE" => expire_variant(app, argv, name, deadline_after_millis),
+        "EXPIREAT" => expire_variant(app, argv, name, |secs| {
             deadline_at_unix_millis(secs.saturating_mul(1000))
         }),
-
-        "PEXPIREAT" => expire_variant(
-            app,
-            conn,
-            rest,
-            "PEXPIREAT key unix-time-milliseconds",
-            deadline_at_unix_millis,
-        ),
+        "PEXPIREAT" => expire_variant(app, argv, name, deadline_at_unix_millis),
 
         "PERSIST" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "PERSIST key");
-            }
-            // NOT_FOUND covers both "no such key" and "key has no TTL",
-            // matching Redis's single 0 reply for either case.
-            let had_expiry = app.store.has_expiry(key);
+            exact_args(argv, name, 1)?;
+            // 0 covers both "no such key" and "key has no TTL", as in
+            // Redis.
+            let had_expiry = app.store.has_expiry(&argv[1]);
             if had_expiry {
-                app.store.set_expire_at(key, None);
+                app.store.set_expire_at(&argv[1], None);
             }
-            reply_ok_or_missing(conn, had_expiry);
+            Ok(Reply::bool(had_expiry))
         }
 
-        "TTL" | "PTTL" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, &format!("{} key", cmd));
-            }
-            if cmd == "TTL" {
-                conn.reply(&format!("TTL {}\r\n", app.store.ttl(key)));
-            } else {
-                conn.reply(&format!("PTTL {}\r\n", app.store.pttl_ms(key)));
-            }
+        "TTL" => {
+            exact_args(argv, name, 1)?;
+            Ok(Reply::Integer(app.store.ttl(&argv[1])))
+        }
+
+        "PTTL" => {
+            exact_args(argv, name, 1)?;
+            Ok(Reply::Integer(app.store.pttl_ms(&argv[1])))
         }
 
         "TYPE" => {
-            let key = trim(rest);
-            if key.is_empty() {
-                return usage(conn, "TYPE key");
-            }
-            match app.store.type_of(key) {
-                Some(t) => conn.reply(&format!("{}\r\n", t.name())),
-                None => conn.reply("NONE\r\n"),
-            }
+            exact_args(argv, name, 1)?;
+            Ok(Reply::Simple(match app.store.type_of(&argv[1]) {
+                Some(t) => t.name(),
+                None => "none",
+            }))
         }
 
         "KEYS" => {
-            let pattern = trim(rest);
-            let pattern = if pattern.is_empty() {
-                None
-            } else {
-                Some(pattern)
-            };
-            let matches: Vec<String> = app
+            exact_args(argv, name, 1)?;
+            let pattern = &argv[1];
+            let matches: Vec<Bytes> = app
                 .store
                 .foreach_key()
                 .into_iter()
-                .filter(|key| pattern.is_none_or(|p| glob_match(p, key)))
+                .filter(|key| glob_match(pattern, key))
                 .collect();
-            reply_list(conn, matches);
+            Ok(Reply::bulk_array(matches))
         }
 
-        "SCAN" => scan(app, conn, rest),
+        "SCAN" => scan(app, argv),
 
-        "DBSIZE" => conn.reply(&format!("COUNT {}\r\n", app.store.size())),
+        "DBSIZE" => {
+            exact_args(argv, name, 0)?;
+            Ok(Reply::Integer(app.store.size() as i64))
+        }
 
         "RENAME" | "RENAMENX" => {
-            let key = next_token(&mut rest);
-            let new_key = next_token(&mut rest);
-            let (key, new_key) = match (key, new_key) {
-                (Some(k), Some(n)) => (k, n),
-                _ => return usage(conn, &format!("{} key newkey", cmd)),
-            };
+            exact_args(argv, name, 2)?;
+            let (key, new_key) = (&argv[1], &argv[2]);
             if !app.store.exists(key) {
-                return conn.reply("NOT_FOUND\r\n");
+                return Ok(Reply::error("ERR no such key"));
             }
-            if cmd == "RENAMENX" && key != new_key && app.store.exists(new_key) {
-                return conn.reply("FALSE\r\n");
+            if name == "RENAMENX" {
+                if key != new_key && app.store.exists(new_key) {
+                    return Ok(Reply::bool(false));
+                }
+                app.store.rename(key, new_key);
+                return Ok(Reply::bool(true));
             }
             app.store.rename(key, new_key);
-            conn.reply("OK\r\n");
+            Ok(Reply::ok())
         }
 
         "COPY" => {
-            let source = next_token(&mut rest);
-            let dest = next_token(&mut rest);
-            let (source, dest) = match (source, dest) {
-                (Some(s), Some(d)) => (s, d),
-                _ => return usage(conn, "COPY source destination [REPLACE]"),
+            min_args(argv, name, 2)?;
+            let replace = match argv.len() {
+                3 => false,
+                4 if eq_ignore_case(&argv[3], "REPLACE") => true,
+                _ => return Err(syntax_error()),
             };
-            let replace = match next_token(&mut rest) {
-                None => false,
-                Some(opt) if opt.eq_ignore_ascii_case("REPLACE") => true,
-                Some(_) => return usage(conn, "COPY source destination [REPLACE]"),
-            };
-            match app.store.copy(source, dest, replace) {
-                None => conn.reply("NOT_FOUND\r\n"),
-                Some(false) => conn.reply("FALSE\r\n"),
-                Some(true) => conn.reply("OK\r\n"),
+            match app.store.copy(&argv[1], &argv[2], replace) {
+                None | Some(false) => Ok(Reply::bool(false)),
+                Some(true) => Ok(Reply::bool(true)),
             }
         }
 
-        "RANDOMKEY" => match app.store.random_key() {
-            Some(key) => conn.reply(&format!("VALUE {}\r\n", key)),
-            None => conn.reply("NOT_FOUND\r\n"),
-        },
+        "RANDOMKEY" => {
+            exact_args(argv, name, 0)?;
+            Ok(match app.store.random_key() {
+                Some(key) => Reply::Bulk(key),
+                None => Reply::Nil,
+            })
+        }
 
         // One keyspace, so FLUSHDB and FLUSHALL do the same thing. Both
         // exist so either name works.
         "FLUSHDB" | "FLUSHALL" => {
             app.store.flush();
-            conn.reply("OK\r\n");
+            Ok(Reply::ok())
         }
 
-        _ => conn.reply("ERR unknown command\r\n"),
+        _ => Ok(Reply::error("ERR unknown command")),
     }
 }
 
-const SCAN_USAGE: &str = "SCAN cursor [MATCH pattern] [COUNT count]";
+/// Shared parsing for the four EXPIRE variants: one key, one number.
+/// `to_deadline` turns that number into an absolute instant.
+fn expire_variant(
+    app: &mut App,
+    argv: &[Bytes],
+    name: &str,
+    to_deadline: fn(i64) -> SystemTime,
+) -> Checked<Reply> {
+    exact_args(argv, name, 2)?;
+    let amount = parse_int(&argv[2])?;
+    Ok(Reply::bool(
+        app.store.set_expire_at(&argv[1], Some(to_deadline(amount))),
+    ))
+}
 
-fn scan(app: &mut App, conn: &mut Conn, rest: &str) {
-    let mut rest = rest;
-    let cursor = match next_token(&mut rest)
-        .and_then(parse_long)
-        .filter(|&c| c >= 0)
-    {
-        Some(c) => c as usize,
-        None => return usage(conn, SCAN_USAGE),
+/// `SCAN cursor [MATCH pattern] [COUNT count]` - replies with the next
+/// cursor as a bulk string and the batch as an array, the two-element
+/// shape every Redis client expects.
+fn scan(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
+    min_args(argv, "SCAN", 1)?;
+    let cursor = match parse_int(&argv[1]) {
+        Ok(c) if c >= 0 => c as usize,
+        _ => return Err(Reply::error("ERR invalid cursor")),
     };
 
-    let mut pattern: Option<&str> = None;
-    let mut count: i64 = app.config.scan_default_count as i64;
-    while let Some(opt) = next_token(&mut rest) {
-        match opt.to_ascii_uppercase().as_str() {
-            "MATCH" => match next_token(&mut rest) {
-                Some(p) => pattern = Some(p),
-                None => return usage(conn, SCAN_USAGE),
-            },
-            "COUNT" => match next_token(&mut rest).and_then(parse_long) {
-                Some(c) if c > 0 => count = c,
-                _ => return usage(conn, SCAN_USAGE),
-            },
-            _ => return usage(conn, SCAN_USAGE),
+    let mut pattern: Option<&Bytes> = None;
+    let mut count = app.config.scan_default_count as i64;
+    let mut i = 2;
+    while i < argv.len() {
+        if eq_ignore_case(&argv[i], "MATCH") && i + 1 < argv.len() {
+            pattern = Some(&argv[i + 1]);
+        } else if eq_ignore_case(&argv[i], "COUNT") && i + 1 < argv.len() {
+            count = match parse_int(&argv[i + 1])? {
+                c if c > 0 => c,
+                _ => return Err(syntax_error()),
+            };
+        } else {
+            return Err(syntax_error());
         }
+        i += 2;
     }
 
     let (batch, next_cursor) = app.store.scan(cursor, count as usize);
-    for key in &batch {
-        if pattern.is_none_or(|p| glob_match(p, key)) {
-            conn.reply(&format!("{}\r\n", key));
-        }
-    }
-    conn.reply(&format!("CURSOR {}\r\n", next_cursor));
+    let keys: Vec<Bytes> = batch
+        .into_iter()
+        .filter(|key| pattern.is_none_or(|p| glob_match(p, key)))
+        .collect();
+    Ok(Reply::array(vec![
+        Reply::bulk(next_cursor.to_string()),
+        Reply::bulk_array(keys),
+    ]))
 }

@@ -6,8 +6,9 @@ same ground at the architecture level. This document is the detailed
 inventory: what exists, what is missing, and which gaps actually block
 real workloads.
 
-**Status, 2026-09-10:** Tier 1 and all of Tier 2 are now built.
-Klyro implements **107 commands**, up from 39. Redis implements roughly
+**Status, 2026-09-10:** Tiers 1, 2, and the protocol rewrite at the top
+of Tier 3 are built. Klyro speaks RESP, so stock Redis clients work, and
+implements **107 commands**, up from 39. Redis implements roughly
 **240**. The gap that remains is not mainly in count: the load-bearing
 pieces left are protocol- and subsystem-shaped, not command-shaped.
 Sections below are marked **Done** where they have been closed. See
@@ -27,37 +28,34 @@ Redis in the first place.
 `SET key value NX EX 30` now takes a lock and its lease atomically.
 `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, and `GETEX` are in too.
 
-One deviation to know about. The value is still the rest of the line, so
-there are no argument boundaries to separate a trailing flag from the
-value. The parser matches the trailing words against the option grammar
-and takes the longest suffix that parses as a complete option list,
-always leaving at least one token as the value. Redis's argument order
-therefore works, but a value whose last words spell valid options
-(`SET k done XX`) loses them. The RESP rewrite in 1.2 removes the
-ambiguity for good; until then `SETEX`/`SETNX` are the unambiguous
-spellings.
+`EXAT`, `PXAT`, and the `GET` flag are in too. The suffix-matching
+workaround the old line protocol needed is gone: RESP delimits
+arguments, so the options parse at fixed positions exactly as Redis
+documents them.
 
-The `GET` flag on `SET` is still missing.
+### 1.2 No RESP protocol — no real client compatibility — **Done**
 
-### 1.2 No RESP protocol — no real client compatibility
+Klyro speaks RESP2 and RESP3, negotiated with `HELLO`. redis-py,
+go-redis, and ioredis all connect and pass a command sweep with no
+adapter; see [resp-protocol.md](resp-protocol.md) for the design and
+[client-libraries.md](client-libraries.md) for the verified list.
 
-The wire format is a bespoke text-line protocol. Consequences:
+Everything that hung off this is fixed with it:
 
-- No off-the-shelf client (`redis-py`, `ioredis`, `go-redis`, `Jedis`,
-  `Lettuce`) can connect. The three hand-written clients in
-  [clients/](../clients/) exist only because of this.
-- Values are not binary-safe. A value containing `\n` corrupts the
-  stream; a List/Set/Zset member containing a space is unparseable,
-  because [strutil.rs](../src/util/strutil.rs) splits on single spaces
-  with no quoting or length prefix.
-- Replies are truncated, silently. `Conn::reply` in
-  [server.rs](../src/server.rs) caps the write buffer at 64 KiB and
-  drops the overflow with no error. A `SMEMBERS` or `KEYS` over a large
-  keyspace returns a partial answer that looks complete. This is the
-  most dangerous item on the list, because it is the only one that
-  returns wrong data rather than an error.
-- No RESP3, so no push messages, no client-side caching / tracking, no
-  attribute or map reply types.
+- **Values are binary-safe.** Keys and values are `Vec<u8>` end to end,
+  so they may hold spaces, newlines, and NUL bytes.
+- **Collection members may contain spaces.** `LPUSH`/`SADD`/`ZADD` no
+  longer need single-token values.
+- **Replies are never silently truncated.** A reply that outgrows
+  `client-output-buffer-limit` closes the connection with an error
+  rather than returning a partial answer that looks complete.
+- **`SET`'s flags parse at fixed positions**, since RESP delimits
+  arguments; the old suffix-matching guess is gone.
+- **The three hand-written client libraries are retired**, because
+  stock clients replace them.
+
+Still missing: RESP3 push messages (nothing to push without pub/sub),
+and `RESET`/`CLIENT`.
 
 ### 1.3 No transactions
 
@@ -257,81 +255,70 @@ call so the server stays responsive).
 
 Places where a command exists but behaves differently from Redis:
 
-1. **Silent reply truncation at 64 KiB** — see 1.2. A partial reply is
-   indistinguishable from a complete one. Still open, and still the most
-   dangerous item in this document.
+1. ~~Silent reply truncation at 64 KiB.~~ **Fixed** by the RESP
+   rewrite. A reply that outgrows `client-output-buffer-limit` now
+   closes the connection with an error instead.
 2. ~~`DBSIZE` counts expired-but-unswept keys.~~ **Fixed.** `Store::size`
-   now filters on liveness, so `DBSIZE` agrees with `KEYS`.
-3. **`SET`'s option flags are matched as a trailing suffix** rather than
-   at fixed argument positions, because the value is the rest of the
-   line. Redis's argument order works; a value whose last words spell
-   valid options does not. See 1.1.
-4. **`SETRANGE` pads with spaces.** Redis pads with null bytes. Padding
-   with `0x20` produces a value that differs from Redis for the same
-   input.
-5. **`ZADD` caps at 128 score/member pairs** (`MAX_ZADD_PAIRS`); Redis
-   has no such limit.
-6. **String length capped at 64 KiB** (`MAX_STRING_LEN`); Redis allows
-   512 MB.
-7. **Expiry uses `SystemTime`**, so a wall-clock adjustment shifts every
+   filters on liveness, so `DBSIZE` agrees with `KEYS`.
+3. ~~`SET`'s option flags are matched as a trailing suffix.~~ **Fixed**
+   by the RESP rewrite; they parse at fixed positions now.
+4. ~~`SETRANGE` pads with spaces.~~ **Fixed.** It pads with NUL bytes,
+   as Redis does, now that values are byte-oriented.
+5. **`ZADD` caps at 128 score/member pairs** (`zadd-max-pairs`); Redis
+   has no such limit. It is at least configurable.
+6. **Expiry uses `SystemTime`**, so a wall-clock adjustment shifts every
    TTL. Redis uses a monotonic-corrected clock.
-8. **Scores display at 6 significant digits** but persist at 17, so a
-   score read back through `ZSCORE` may be rounded relative to what the
-   dump file holds.
-9. **`TTL` returns `-2`/`-1` as a `TTL <n>` line**, not an integer reply;
-   this is a protocol-shape difference, harmless in isolation.
-10. **`SPOP`/`SRANDMEMBER`/`RANDOMKEY` use a xorshift PRNG** seeded from
-    the wall clock. Fine for spreading picks around, not suitable
-    anywhere randomness needs to be unpredictable.
-
----
+7. **`SPOP`/`SRANDMEMBER`/`RANDOMKEY` use a xorshift PRNG** seeded from
+   the wall clock. Fine for spreading picks around, not suitable
+   anywhere randomness needs to be unpredictable.
+8. **`INFO` reports a `redis_version`** of 7.0.0, because client
+   libraries gate command availability on it. It names the Redis release
+   whose command shapes Klyro implements, not a claim to be that server;
+   `klyro_version` sits beside it.
+9. **`HELLO` reports `id: 0` for every connection**, since connections
+   are not individually identified. Nothing Klyro implements uses the
+   client id.
 
 ## 7. Suggested build order
 
-Ordered by (value delivered ÷ effort), not by size.
+Ordered by (value delivered / effort), not by size.
 
 **Tier 1 — cheap, high value, no architectural change — Done**
 
-All eight items are built: `EXISTS`; variadic `DEL`/`HDEL`/`SREM`/
-`ZREM`; `STRLEN`/`INCRBY`/`DECRBY`/`INCRBYFLOAT`/`MGET`/`MSET`;
-`HEXISTS`/`HKEYS`/`HVALS`/`HMGET`/`HMSET`/`HINCRBY`/`HINCRBYFLOAT`/
-`HSETNX`/`HSTRLEN`; `PERSIST`/`PTTL`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`/
-`RENAME`/`RENAMENX`/`COPY`/`FLUSHDB`/`FLUSHALL`/`RANDOMKEY`/`UNLINK`;
-`LINDEX`/`LSET`/`LREM`/`LTRIM`/`LINSERT`/`LPUSHX`/`RPUSHX`/`RPOPLPUSH`/
-`LMOVE` and `LPOP`/`RPOP` counts; the set algebra plus `SPOP`/
-`SRANDMEMBER`/`SMOVE`/`SMISMEMBER`; and `ZINCRBY`/`ZRANK`/`ZREVRANK`/
-`ZREVRANGE`/`ZRANGEBYSCORE`/`ZREVRANGEBYSCORE`/`ZCOUNT`/`ZMSCORE`/
-`ZPOPMIN`/`ZPOPMAX`/`ZREMRANGEBYRANK`/`ZREMRANGEBYSCORE`.
+All eight items are built; see [command-expansion.md](command-expansion.md).
 
 **Tier 2 — the two that unlock real workloads — Done**
 
-9. ~~`SET` with `NX`/`XX`/`EX`/`PX`/`KEEPTTL`, plus `SETNX`/`SETEX`/
-   `GETSET`/`GETDEL`.~~ **Done** — Klyro can hold a lock now.
+9. ~~`SET` with `NX`/`XX`/`EX`/`PX`/`KEEPTTL`, plus the `SETNX` family.~~
+   **Done** — Klyro can hold a lock now.
 10. ~~`INFO` and `CONFIG GET`/`SET`, plus a config file.~~ **Done** —
     Klyro can be operated now. See [configuration.md](configuration.md).
 
-**Tier 3 — the protocol rewrite (everything downstream depends on it).
-This is now the top of the list.**
+**Tier 3 — the protocol rewrite and what it unblocks**
 
-11. RESP2 parser and serializer in `server.rs`, replacing the line
-    protocol. Fixes binary safety, the space-in-value restriction, the
-    silent truncation, and `SET`'s suffix-matched flags, and makes every
-    stock Redis client work. Retire the three hand-written clients in
-    `clients/` afterward.
-12. `MULTI`/`EXEC`/`WATCH` on top of RESP.
-13. Pub/sub, then blocking commands (`BLPOP` and friends), both of which
-    need the connection-state machinery RESP forces you to build anyway.
+11. ~~RESP2 parser and serializer, replacing the line protocol.~~
+    **Done**, with RESP3 as well. See
+    [resp-protocol.md](resp-protocol.md). Stock clients work, values are
+    binary-safe, and the silent truncation is gone.
+12. **`MULTI`/`EXEC`/`WATCH`.** Now the top of the list. The command
+    layer already returns a `Reply` value rather than writing to a
+    socket, which is most of what queuing a transaction needs; what is
+    missing is per-connection state and a watched-key registry.
+13. **Pub/sub, then blocking commands** (`BLPOP` and friends). Both need
+    the event loop to be able to park a connection and wake it, which is
+    the one piece of machinery RESP did not bring with it. RESP3's push
+    type is already specified in `resp.rs`'s design, though unimplemented.
 
 **Tier 4 — separable large efforts**
 
-14. `maxmemory` + LRU/LFU eviction. Required for cache use.
+14. `maxmemory` + LRU/LFU eviction. Required for cache use, and the
+    measurement half is already done: `INFO memory` reports real usage
+    from the counting allocator.
 15. AOF with `appendfsync`, plus forked `BGSAVE`.
 16. Replication (`REPLICAOF`, `PSYNC`), then Sentinel, then Cluster.
 17. `AUTH`/ACL, then TLS.
 18. Streams; skip-list sorted set; `epoll`/`kqueue`; bitmaps and HLL.
 
-**Not on the ladder, but owed:** the three client libraries in
-[clients/](../clients/) still cover only the original 39 commands. They
-keep working — every variadic extension preserved its single-argument
-reply — but none of the 66 new commands is reachable from Python, Node,
-or Go yet.
+**Cheap cleanups worth doing along the way:** `SCAN`'s cursor still
+sorts the whole keyspace per call (item in section 5), and the expired-key
+sweep is still a full scan rather than Redis's sampling.

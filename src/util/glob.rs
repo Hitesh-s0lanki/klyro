@@ -5,8 +5,11 @@
 //! a literal `]` is allowed as the class's first character), and `\`
 //! escapes the next pattern character to match it literally.
 
-pub fn glob_match(pattern: &str, s: &str) -> bool {
-    glob_match_bytes(pattern.as_bytes(), s.as_bytes())
+/// Whether `s` matches `pattern`. Both are raw bytes: keys are not
+/// required to be valid UTF-8, so neither is the pattern that selects
+/// them.
+pub fn glob_match(pattern: &[u8], s: &[u8]) -> bool {
+    glob_match_bytes(pattern, s)
 }
 
 fn glob_match_bytes(pattern: &[u8], s: &[u8]) -> bool {
@@ -93,28 +96,28 @@ mod tests {
 
     #[test]
     fn star_matches_any_run() {
-        assert!(glob_match("user:*", "user:1"));
-        assert!(glob_match("*:1", "user:1"));
-        assert!(glob_match("*", ""));
+        assert!(glob_match(b"user:*", b"user:1"));
+        assert!(glob_match(b"*:1", b"user:1"));
+        assert!(glob_match(b"*", b""));
     }
 
     #[test]
     fn question_mark_matches_one_char() {
-        assert!(glob_match("post:?", "post:1"));
-        assert!(!glob_match("post:?", "post:12"));
+        assert!(glob_match(b"post:?", b"post:1"));
+        assert!(!glob_match(b"post:?", b"post:12"));
     }
 
     #[test]
     fn character_class_and_negation() {
-        assert!(glob_match("[us]*", "user:1"));
-        assert!(glob_match("[us]*", "session:abc"));
-        assert!(!glob_match("[^up]*", "user:1"));
-        assert!(glob_match("[^up]*", "session:abc"));
+        assert!(glob_match(b"[us]*", b"user:1"));
+        assert!(glob_match(b"[us]*", b"session:abc"));
+        assert!(!glob_match(b"[^up]*", b"user:1"));
+        assert!(glob_match(b"[^up]*", b"session:abc"));
     }
 
     #[test]
     fn exact_match_no_wildcards() {
-        assert!(glob_match("user:1", "user:1"));
-        assert!(!glob_match("user:1", "user:2"));
+        assert!(glob_match(b"user:1", b"user:1"));
+        assert!(!glob_match(b"user:1", b"user:2"));
     }
 }

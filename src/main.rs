@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod config;
 mod persist;
+mod resp;
 mod server;
 mod stats;
 mod store;
@@ -21,6 +22,10 @@ static ALLOCATOR: util::memory::CountingAllocator = util::memory::CountingAlloca
 const KLYRO_NAME: &str = "Klyro";
 const KLYRO_TAGLINE: &str = "The high-performance in-memory data server";
 pub const KLYRO_VERSION: &str = "0.1.0";
+/// Reported as `redis_version` by INFO. Client libraries gate command
+/// availability on it, so it names the Redis release whose command
+/// shapes Klyro implements - not a claim to be that server.
+pub const REDIS_COMPAT_VERSION: &str = "7.0.0";
 
 const USAGE: &str = "usage: klyro [port [dump-file]] | klyro <config-file>";
 
