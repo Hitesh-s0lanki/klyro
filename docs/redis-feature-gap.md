@@ -253,12 +253,13 @@ existing types.
 - **No Sentinel and no Cluster.** Single process, single node, bounded by
   one machine's RAM and one core. No hash slots, no `CLUSTER` command
   family, no `MOVED`/`ASK` redirection.
-- **No `maxmemory` and no eviction policy.** Redis offers eight
-  (`allkeys-lru`, `volatile-ttl`, `allkeys-lfu`, ...). Klyro grows until
-  the OS kills it, which makes it unusable as a bounded cache — the most
-  common Redis deployment shape of all. `INFO memory` now reports real
-  usage from a counting allocator, so the measurement half of this is
-  done; the policy half is not.
+- ~~**No `maxmemory` and no eviction policy.**~~ **Done (2026-09-10).**
+  All eight of Redis's policies (`allkeys-lru`, `volatile-ttl`,
+  `allkeys-lfu`, ...), chosen by sampling `maxmemory-samples` keys per
+  round as Redis does. Writes that could grow the keyspace are refused
+  with `OOM` once eviction cannot free enough; everything that can only
+  shrink it still runs. `INFO` reports the limit, the policy, and an
+  `evicted_keys` count. See [eviction.md](eviction.md).
 
 ---
 
@@ -269,12 +270,13 @@ These are correctness-adjacent: they work, but degrade badly with size.
 | Area | Current | Redis |
 |---|---|---|
 | Expired-key sweep | `Store::sweep_expired` scans the **entire** keyspace every second | Samples 20 random keys from the volatile set, adaptively |
+| Eviction | Samples `maxmemory-samples` keys per round from an O(1) key index | The same, plus a pool carrying good candidates between rounds |
 | `SCAN` | `Store::scan` collects and **sorts every live key on each call** — O(N log N) per call, O(N² log N) for a full iteration | O(1) amortized per call via reverse-binary bucket cursor |
 | `KEYS` | Clones every key into a `Vec` before filtering | Streams matches, still O(N) but no full copy |
 | Sorted set | `Vec<(String, f64)>` with linear `find_index`; `add`/`rem` are O(N) | Skip list + hash map, O(log N) |
 | Event loop | `poll()`, rebuilding the pollfd array each iteration — O(N) per tick in connection count | `epoll`/`kqueue`, O(ready) |
 | Threading | Strictly single-threaded | Single-threaded command execution plus optional I/O threads |
-| Connections | Unbounded; nothing enforces a limit | `maxclients`, with a graceful rejection |
+| Connections | Bounded by `maxclients`, with a graceful rejection | The same |
 | Encodings | One representation per type | listpack / intset / ziplist compaction for small collections |
 
 The `SCAN` implementation deserves special mention: because the cursor is
@@ -352,22 +354,22 @@ All eight items are built; see [command-expansion.md](command-expansion.md).
 
 **Tier 4 — separable large efforts**
 
-14. `maxmemory` + LRU/LFU eviction. Required for cache use, and the
-    measurement half is already done: `INFO memory` reports real usage
-    from the counting allocator.
+14. ~~`maxmemory` + LRU/LFU eviction.~~ **Done.** See section 4 and
+    [eviction.md](eviction.md).
 15. AOF with `appendfsync`, plus forked `BGSAVE`.
 16. Replication (`REPLICAOF`, `PSYNC`), then Sentinel, then Cluster.
 17. `AUTH`/ACL, then TLS.
 18. Streams; skip-list sorted set; `epoll`/`kqueue`; bitmaps and HLL.
 
-**Now the top of the list:** item 14, `maxmemory` with an eviction
-policy. It is what stands between Klyro and the most common Redis
-deployment shape of all, a bounded cache, and the measurement half is
-already done.
+**Now the top of the list:** item 17, `AUTH`. It is the smallest of the
+four remaining subsystems and the one whose absence is hardest to work
+around - the server binds `0.0.0.0` with full read/write access to
+anyone who can reach the port, so today the only safe deployment is one
+nobody else can route to.
 
 **Cheap cleanups worth doing along the way:** `SCAN`'s cursor still
-sorts the whole keyspace per call (item in section 5), the expired-key
-sweep is still a full scan rather than Redis's sampling, and
-`notify-keyspace-events` is now a small job rather than a large one -
-the write signal it needs already exists, in
+sorts the whole keyspace per call (item in section 5); the expired-key
+sweep is still a full scan rather than Redis's sampling, which the
+eviction sampler makes a small job now; and `notify-keyspace-events` is
+also small, because the write signal it needs already exists, in
 [keyspec.rs](../src/commands/keyspec.rs).

@@ -181,11 +181,13 @@ fn config_get_lists_everything_and_supports_globs() {
     let server = KlyroServer::new();
     let mut client = server.connect();
     let reply = client.send("CONFIG GET *");
-    assert_eq!(reply.pairs().len(), 19);
+    assert_eq!(reply.pairs().len(), 22);
     assert_eq!(parameter(&reply, "port"), server.port.to_string());
     assert_eq!(parameter(&reply, "mem-max-topk"), "100");
-    // 0 is a real setting for this one, meaning "no limit".
+    // 0 is a real setting for these two, meaning "no limit".
     assert_eq!(parameter(&reply, "mem-max-records"), "0");
+    assert_eq!(parameter(&reply, "maxmemory"), "0");
+    assert_eq!(parameter(&reply, "maxmemory-policy"), "noeviction");
 
     let reply = client.send("CONFIG GET mem-max-t*");
     assert_eq!(

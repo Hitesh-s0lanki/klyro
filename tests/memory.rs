@@ -96,12 +96,10 @@ fn create_rejects_a_dimension_past_the_configured_ceiling() {
         .send("MEM.CREATE ns MODE VECTOR DIM 99999")
         .error()
         .starts_with("ERR DIM must be between 1 and mem-max-dim"));
-    assert!(
-        !client
-            .send("MEM.CREATE ns MODE VECTOR DIM 0")
-            .error()
-            .is_empty()
-    );
+    assert!(!client
+        .send("MEM.CREATE ns MODE VECTOR DIM 0")
+        .error()
+        .is_empty());
 }
 
 #[test]

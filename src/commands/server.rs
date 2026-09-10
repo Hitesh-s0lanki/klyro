@@ -261,6 +261,17 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("used_memory_human", human_bytes(used));
             line!("used_memory_peak", peak);
             line!("used_memory_peak_human", human_bytes(peak));
+            let limit = app.config.maxmemory;
+            line!("maxmemory", limit);
+            line!(
+                "maxmemory_human",
+                if limit == 0 {
+                    "unlimited".to_string()
+                } else {
+                    human_bytes(limit)
+                }
+            );
+            line!("maxmemory_policy", app.config.maxmemory_policy.name());
         }
 
         "persistence" => {
@@ -284,6 +295,7 @@ fn append_section(app: &mut App, section: &str, out: &mut String) {
             line!("keyspace_hits", app.stats.keyspace_hits);
             line!("keyspace_misses", app.stats.keyspace_misses);
             line!("expired_keys", app.store.expired_count());
+            line!("evicted_keys", app.stats.evicted_keys);
             line!("pubsub_channels", app.pubsub.active_channels(None).len());
             line!("pubsub_patterns", app.pubsub.pattern_count());
             line!("total_messages_published", app.stats.messages_published);

@@ -19,6 +19,10 @@ pub struct Stats {
     /// Memory records dropped because their own TTL passed - the
     /// per-record counterpart to the keyspace's expired-key count.
     pub memory_records_expired: u64,
+    /// Keys dropped to stay under `maxmemory`. Separate from the
+    /// expired count: an expiry is what the client asked for, an
+    /// eviction is the server overruling it.
+    pub evicted_keys: u64,
     /// PUBLISH calls, whether or not anyone was listening.
     pub messages_published: u64,
     /// Transactions that reached EXEC and ran, which excludes the ones
@@ -40,6 +44,7 @@ impl Stats {
             keyspace_hits: 0,
             keyspace_misses: 0,
             memory_records_expired: 0,
+            evicted_keys: 0,
             messages_published: 0,
             transactions: 0,
             last_save_at: None,
@@ -61,6 +66,7 @@ impl Stats {
         self.total_commands = 0;
         self.keyspace_hits = 0;
         self.keyspace_misses = 0;
+        self.evicted_keys = 0;
         self.messages_published = 0;
         self.transactions = 0;
     }

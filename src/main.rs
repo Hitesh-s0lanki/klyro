@@ -2,6 +2,7 @@ mod app;
 mod client;
 mod commands;
 mod config;
+mod evict;
 mod persist;
 mod pubsub;
 mod resp;

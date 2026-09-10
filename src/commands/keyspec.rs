@@ -152,6 +152,73 @@ const WRITES: &[(&str, Position)] = &[
     ("MEM.EXPIRE", first_key()),
 ];
 
+/// Commands that may need more memory than they release, and so are
+/// refused when the server is over `maxmemory` and eviction could not
+/// bring it back under.
+///
+/// The line is what the command does to the total, not whether it
+/// writes: `DEL`, `LPOP`, and `EXPIRE` all change the keyspace but none
+/// of them can grow it, so all three keep working while a full server
+/// is being drained - which is the whole point of letting them through.
+/// Redis marks the same set with its `denyoom` flag.
+const DENY_OOM: &[&str] = &[
+    // --- generic ---
+    "RENAME",
+    "RENAMENX",
+    "COPY",
+    // --- strings ---
+    "SET",
+    "SETNX",
+    "SETEX",
+    "PSETEX",
+    "GETSET",
+    "MSET",
+    "MSETNX",
+    "APPEND",
+    "SETRANGE",
+    // A counter is a string, and one more digit is one more byte.
+    "INCR",
+    "DECR",
+    "INCRBY",
+    "DECRBY",
+    "INCRBYFLOAT",
+    // --- lists ---
+    "LPUSH",
+    "RPUSH",
+    "LPUSHX",
+    "RPUSHX",
+    "LSET",
+    "LINSERT",
+    "RPOPLPUSH",
+    "LMOVE",
+    "BLMOVE",
+    "BRPOPLPUSH",
+    // --- hashes ---
+    "HSET",
+    "HSETNX",
+    "HMSET",
+    "HINCRBY",
+    "HINCRBYFLOAT",
+    // --- sets ---
+    "SADD",
+    "SMOVE",
+    "SINTERSTORE",
+    "SUNIONSTORE",
+    "SDIFFSTORE",
+    // --- sorted sets ---
+    "ZADD",
+    "ZINCRBY",
+    // --- memory indexes ---
+    "MEM.CREATE",
+    "MEM.ADD",
+    "MEM.SETMETA",
+];
+
+/// Whether `name` is refused when the server is out of memory.
+pub fn denies_oom(name: &str) -> bool {
+    DENY_OOM.contains(&name)
+}
+
 /// The keys `argv` modifies, or `None` for a read-only command.
 ///
 /// Arguments that fall outside the vector are skipped rather than
@@ -244,6 +311,32 @@ mod tests {
         assert_eq!(keys("LMPOP 2 a b LEFT"), vec!["a", "b"]);
         assert_eq!(keys("BLMPOP 0 2 a b LEFT COUNT 3"), vec!["a", "b"]);
         assert_eq!(keys("ZMPOP 1 z MIN"), vec!["z"]);
+    }
+
+    #[test]
+    fn only_the_commands_that_can_grow_the_keyspace_deny_oom() {
+        for name in ["SET", "LPUSH", "INCR", "HSET", "ZADD", "MEM.ADD"] {
+            assert!(denies_oom(name), "{name} can grow memory");
+        }
+        // These change the keyspace but only ever downwards, so a full
+        // server must still accept them.
+        for name in ["DEL", "LPOP", "EXPIRE", "FLUSHALL", "GETDEL", "SREM"] {
+            assert!(!denies_oom(name), "{name} cannot grow memory");
+        }
+        // As must reads.
+        for name in ["GET", "LRANGE", "INFO", "MEM.QUERY"] {
+            assert!(!denies_oom(name), "{name} is a read");
+        }
+    }
+
+    #[test]
+    fn every_deny_oom_command_is_a_write() {
+        for name in DENY_OOM {
+            assert!(
+                WRITES.iter().any(|(command, _)| command == name),
+                "{name} denies OOM but is not listed as a write"
+            );
+        }
     }
 
     #[test]

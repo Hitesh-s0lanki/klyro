@@ -304,6 +304,10 @@ pub(crate) fn execute(app: &mut App, client: &mut Client, name: &str, argv: &[By
         )));
     }
 
+    if let Some(refusal) = memory_gate(app, name) {
+        return Response::new(refusal);
+    }
+
     let before = app.store.lookup_counts();
     let response = run(app, client, name, argv);
 
@@ -317,6 +321,27 @@ pub(crate) fn execute(app: &mut App, client: &mut Client, name: &str, argv: &[By
     }
     signal_writes(app, name, argv, &response);
     response
+}
+
+/// Frees memory before a command runs, and refuses the command if it
+/// could not be freed.
+///
+/// Runs ahead of every command rather than only the writes: a server
+/// over its limit should come back under it on the next command it
+/// sees, whatever that command is. What the command is decides only
+/// what happens when eviction falls short - a write that could grow the
+/// keyspace is refused, and everything else, including the `DEL` that
+/// would fix the problem, goes through.
+fn memory_gate(app: &mut App, name: &str) -> Option<Reply> {
+    if app.config.maxmemory == 0 {
+        return None;
+    }
+    if crate::evict::make_room(app) || !keyspec::denies_oom(name) {
+        return None;
+    }
+    Some(Reply::error(
+        "OOM command not allowed when used memory > 'maxmemory'.",
+    ))
 }
 
 /// Tells the watch and blocking registries which keys just changed.

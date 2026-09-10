@@ -75,6 +75,23 @@ an explicit `SAVE` command, and automatically every 60s if anything
 changed. Killing the process (`SIGKILL`, a crash, or power loss) loses
 any changes since the last save.
 
+## Install from npm
+
+No toolchain needed - npm downloads a prebuilt binary for your machine:
+
+```sh
+npx klyro-db                      # port 7171, dump file klyro.dump
+npx klyro-db 7200                 # a different port
+npx klyro-db klyro.conf           # a config file
+```
+
+`npm install -g klyro-db` leaves a `klyro` command on your PATH instead.
+It takes the same arguments as the binary, because it *is* the binary -
+the package is a launcher plus one platform's build, published from
+[npm/](npm/). Builds exist for macOS and Linux on x64 and arm64; the
+event loop is `poll(2)`, so there is no Windows build. See
+[docs/npm-package.md](docs/npm-package.md).
+
 ## Run with Docker
 
 Every merge to `main` publishes an image, so there is usually nothing to
@@ -505,7 +522,7 @@ src/
   stats.rs       - the counters INFO reports
   commands/      - command parsing and dispatch, grouped by data type
     mod.rs       -   the router plus reply helpers shared by the handlers
-    keyspec.rs   -   which keys each write command touches, for WATCH and BLPOP
+    keyspec.rs   -   which keys each write command touches, and which deny OOM
     generic.rs   -   any-type keys: DEL/EXISTS/EXPIRE/RENAME/COPY/SCAN/...
     string.rs    -   SET (with its option flags), the SETNX family, INCR*
     list.rs      -   push/pop, LINDEX/LSET/LINSERT/LREM/LTRIM, LMOVE
@@ -518,6 +535,7 @@ src/
     memory.rs    -   the MEM.* family: CRUD, SEARCH/VSEARCH/QUERY
     server.rs    -   PING/ECHO/HELLO/CLIENT/INFO/CONFIG/SAVE/QUIT/SHUTDOWN
   store.rs       - the keyspace: maps keys to typed values, with expiry
+  evict.rs       - maxmemory: the eviction policies and how a victim is picked
   persist.rs     - save/load the whole keyspace to a dump file
   app.rs         - bundles Store + Persist + the running flag shared by the above
   types/         - the data type implementations, all byte-oriented
@@ -535,8 +553,8 @@ src/
   util/          - generic infrastructure with no keyspace/protocol knowledge
     bytes.rs     -   the Bytes alias plus byte parsing/formatting helpers
     glob.rs      -   glob pattern matching (used by KEYS/SCAN)
-    rand.rs      -   xorshift PRNG (used by SPOP/SRANDMEMBER/RANDOMKEY)
-    memory.rs    -   counting global allocator (used by INFO memory)
+    rand.rs      -   xorshift PRNG (used by SPOP/SRANDMEMBER/RANDOMKEY, eviction)
+    memory.rs    -   counting global allocator (used by INFO memory, maxmemory)
 
 Dockerfile            - two-stage image build (static musl binary -> Alpine)
 docker-compose.yml    - one service, published port, named volume for /data
@@ -562,6 +580,10 @@ tests/           - the integration suite (see "Test" above)
   scan.rs        -  KEYS glob patterns, SCAN's resumable cursor
   persistence.rs -  save/kill/reload round-trip, the version 1 dump format
   admin.rs       -  INFO sections and counters, CONFIG, HELLO negotiation
+
+npm/             - the npm packages (see docs/npm-package.md)
+  build.mjs      -  assembles them from a built binary into npm/dist/
+  klyro-db/      -  the wrapper users install: a README and the launcher
 
 frontend/        - the website: marketing home page + documentation
   src/app/       -  routes; /docs holds one directory per docs page
@@ -603,6 +625,34 @@ per-test isolation means `Drop` alone guarantees cleanup even when a
 test panics, with no shared state or key-namespacing needed between
 tests.
 
+## Memory limit and eviction
+
+Klyro grows without bound until you give it a ceiling:
+
+```sh
+redis-cli -p 7171 CONFIG SET maxmemory 512mb
+redis-cli -p 7171 CONFIG SET maxmemory-policy allkeys-lru
+```
+
+The eight policies are Redis's. The first half of the name says which
+keys are eligible - `allkeys-` any of them, `volatile-` only the ones
+carrying a TTL - and the second says which goes first: `-lru` the least
+recently used, `-lfu` the least frequently used, `-random` any of them,
+and `volatile-ttl` the one expiring soonest. The default is
+`noeviction`, which refuses writes rather than dropping data nobody said
+was expendable.
+
+At the limit, a command that could grow the keyspace is answered with
+`OOM command not allowed when used memory > 'maxmemory'.` Everything
+else still runs, `DEL` and `FLUSHALL` included, because refusing those
+would close the only way out of the state.
+
+`INFO memory` reports the limit and the policy, and `INFO stats` counts
+`evicted_keys` separately from `expired_keys` - an expiry is what the
+client asked for, an eviction is the server overruling it. See
+[docs/eviction.md](docs/eviction.md) for what is measured, how a victim
+is chosen, and what this does not do.
+
 ## Persistence format
 
 The dump file is length-prefixed, because a value may contain a newline:
@@ -637,9 +687,11 @@ comparison against Redis. The ones worth knowing before you use this:
   because the server is single-threaded and an unbounded scan would
   stall every other client. Both are addressed in
   [docs/memory-structures.md](docs/memory-structures.md).
-- No `maxmemory` or eviction policy: the dataset grows until the process
-  runs out of memory. `INFO memory` reports how much is in use, but
-  nothing acts on it.
+- Eviction is approximate: a victim is the best of `maxmemory-samples`
+  randomly drawn keys, not the true least-recently-used one. `maxmemory`
+  measures the whole process rather than the keyspace, so a limit set
+  below what the server needs at rest can never be satisfied. See
+  [docs/eviction.md](docs/eviction.md).
 - No authentication, ACLs, or TLS; do not expose this on an untrusted
   network.
 - Sorted Set range/lookup ops are O(n) (a sorted array, not a skip list) —

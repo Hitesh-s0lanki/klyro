@@ -64,9 +64,10 @@ suggested build order - see [redis-feature-gap.md](redis-feature-gap.md).
 - No authentication or ACLs - anyone who can reach the port has full
   read/write access.
 - No TLS.
-- No memory limits or eviction policies (LRU/LFU) - the dataset grows
-  until the process runs out of memory. `INFO memory` measures it, but
-  nothing acts on the measurement.
+- ~~No memory limits or eviction policies (LRU/LFU)~~ **Done
+  (2026-09-10).** `maxmemory` with Redis's eight policies, approximate
+  sampling, and an `OOM` refusal for the writes that could grow the
+  keyspace. See [eviction.md](eviction.md).
 - ~~No metrics/observability~~ **Done (2026-09-10).** `INFO` reports
   six sections, including real memory use from a counting allocator and
   a read-command hit ratio. Still no logging beyond startup/shutdown
@@ -124,9 +125,16 @@ not block, or wait on, any of it.
 9. ~~**Pub/sub, then blocking commands**~~ Done - see above. All three
    landed together, because all three needed the same thing: per-
    connection state, and an event loop that can park a connection.
-10. **`maxmemory` with an eviction policy** - now the top of the list,
-    and what stands between Klyro and use as a bounded cache. `INFO`
-    already reports real memory use from a counting allocator, so the
-    measurement half is done.
+10. ~~**`maxmemory` with an eviction policy**~~ Done - see above. Klyro
+    works as a bounded cache now.
 11. **Persistence hardening (AOF)**, **auth**, **replication** - larger,
-    separable efforts; not blocking anything else on this list.
+    separable efforts; not blocking anything else on this list. Auth is
+    the smallest of the three and now the top of the list: it is what
+    stands between Klyro and running anywhere a stranger can reach the
+    port.
+
+Two cheap cleanups are worth doing along the way, both called out in
+[redis-feature-gap.md](redis-feature-gap.md) section 5: `SCAN`'s cursor
+still sorts the whole keyspace on every call, and the expired-key sweep
+is still a full scan rather than Redis's sampling. The sampling
+machinery eviction needed makes the second one a small job now.
