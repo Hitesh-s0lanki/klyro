@@ -116,13 +116,6 @@ Three constraints that are easy to trip over:
    out of the rendered article, so no separate table of contents is
    maintained.
 
-## Placeholders
-
-Real product behaviour is documented from the server and published packages.
-One group of links remains deliberately dummy and is labelled in source:
-
-- **Social and site URLs** in `src/lib/site.ts` (`site.url`, `site.social`).
-
 ## Notes
 
 - Syntax highlighting is a small tokenizer in `src/lib/highlight.ts`

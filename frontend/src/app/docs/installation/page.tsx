@@ -199,7 +199,6 @@ cargo test
 +PONG
 
 INFO server
-$...
 # server
 klyro_version:0.1.1
 tcp_port:7171

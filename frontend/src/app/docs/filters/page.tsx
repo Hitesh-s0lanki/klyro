@@ -3,6 +3,7 @@ import { DocHeader } from "@/components/docs/DocHeader";
 import { Callout } from "@/components/docs/Callout";
 import { RefTable } from "@/components/docs/Table";
 import { CodeBlock } from "@/components/ui/CodeBlock";
+import { CodeTabs } from "@/components/ui/CodeTabs";
 
 export const metadata: Metadata = {
   title: "Filters & metadata",
@@ -23,13 +24,48 @@ export default function FiltersPage() {
         Each filter is three arguments: a field, an operator, and a value. Repeat
         the triple to add conditions; they are combined with AND.
       </p>
-      <CodeBlock
-        lang="resp"
-        filename="klyro"
-        code={`MEM.QUERY user:123 TEXT "delivery" FVEC 384 ... TOPK 5 \\
+      <CodeTabs
+        className="my-6"
+        tabs={[
+          { label: "TypeScript", lang: "ts", code: `const hits = await db.memory.query("user:123", {
+  text: "delivery",
+  vector: [0.10, 0.79, 0.46],
+  topK: 5,
+  filters: [
+    { field: "type", op: "EQ", value: "shipping" },
+    { field: "@importance", op: "GTE", value: 0.6 },
+    { field: "region", op: "IN", value: "eu,uk" },
+  ],
+});` },
+          { label: "Python", lang: "python", code: `from klyro_db import Filter, MemoryQuery
+
+hits = db.memory.query("user:123", MemoryQuery(
+    text="delivery",
+    vector=[0.10, 0.79, 0.46],
+    top_k=5,
+    filters=[
+        Filter("type", "EQ", "shipping"),
+        Filter("@importance", "GTE", 0.6),
+        Filter("region", "IN", "eu,uk"),
+    ],
+))` },
+          { label: "Go", lang: "go", code: `hits, err := db.Memory.Query(ctx, "user:123", klyro.QueryOptions{
+  Text: "delivery",
+  Vector: []float32{0.10, 0.79, 0.46},
+  SearchOptions: klyro.SearchOptions{
+    TopK: 5,
+    Filters: []klyro.Filter{
+      {Field: "type", Op: "EQ", Value: "shipping"},
+      {Field: "@importance", Op: "GTE", Value: 0.6},
+      {Field: "region", Op: "IN", Value: "eu,uk"},
+    },
+  },
+})` },
+          { label: "redis-cli", lang: "resp", code: `MEM.QUERY user:123 TEXT "delivery" FVEC 3 0.10 0.79 0.46 TOPK 5 \\
   FILTER type EQ shipping \\
   FILTER @importance GTE 0.6 \\
-  FILTER region IN "eu,uk"`}
+  FILTER region IN "eu,uk"` },
+        ]}
       />
 
       <h2 id="operators">Operators</h2>
@@ -38,7 +74,7 @@ export default function FiltersPage() {
         rows={[
           ["EQ / NE", "Equal, not equal", "FILTER type EQ preference"],
           ["GT / GTE", "Greater than, greater or equal", "FILTER @importance GTE 0.8"],
-          ["LT / LTE", "Less than, less or equal", "FILTER @created_at LT 1757462400"],
+          ["LT / LTE", "Less than, less or equal", "FILTER @created_at LT 1757462400000"],
           ["IN", "Member of a comma-separated list", 'FILTER region IN "eu,uk,us"'],
           ["CONTAINS", "Substring match on the value", "FILTER source CONTAINS zendesk"],
         ]}
@@ -61,8 +97,8 @@ export default function FiltersPage() {
           ["@id", "bytes", "Fetch or exclude a known record"],
           ["@text", "bytes", "Substring conditions with CONTAINS"],
           ["@importance", "number", "Only recall what was marked as mattering"],
-          ["@created_at", "unix seconds", "Restrict to a window of time"],
-          ["@updated_at", "unix seconds", "Find records revised since a checkpoint"],
+          ["@created_at", "unix milliseconds", "Restrict to a window of time"],
+          ["@updated_at", "unix milliseconds", "Find records revised since a checkpoint"],
         ]}
       />
 

@@ -22,7 +22,8 @@ export default function ClientsPage() {
       <Callout variant="tip" title="Typed clients are available">
         <p>
           Install a TypeScript, Python, or Go client for typed methods covering
-          all 15 <code>MEM.*</code> commands. The raw Redis clients below remain
+          all 15 <code>MEM.*</code> commands. Each typed client also exposes its
+          underlying Redis client, so standard commands and raw calls remain
           useful for other languages and direct protocol access. See{" "}
           <a href="/docs/sdks">SDKs and packages</a>.
         </p>
@@ -43,61 +44,102 @@ export default function ClientsPage() {
         they are simply untested here.
       </p>
 
-      <h2 id="basics">The basics</h2>
+      <h2 id="typed-basics">Typed client basics</h2>
+      <p>
+        Each Klyro client keeps its ecosystem&apos;s standard Redis API and adds a
+        typed <code>memory</code> surface. These examples connect to the default
+        address, execute ordinary commands, and close the connection cleanly.
+      </p>
       <CodeTabs
         tabs={[
           {
             label: "Python",
             lang: "python",
-            code: `import redis
+            code: `from klyro_db import Klyro
 
-r = redis.Redis(host="localhost", port=7171, decode_responses=True)
-r.set("greeting", "hello")
-print(r.get("greeting"))
+db = Klyro()
+db.set("greeting", "hello")
+print(db.get("greeting").decode())
 
-# The distributed-lock primitive
-if r.set("lock:job", "token", nx=True, ex=30):
-    ...`,
+db.close()`,
+          },
+          {
+            label: "TypeScript",
+            lang: "ts",
+            code: `import { createClient } from "klyro-db";
+
+const db = createClient();
+await db.set("greeting", "hello");
+console.log(await db.get("greeting"));
+
+await db.quit();`,
           },
           {
             label: "Go",
             lang: "go",
-            code: `import klyro "github.com/Hitesh-s0lanki/klyro/go"
+            code: `import (
+    "context"
+    "log"
 
-r := klyro.NewClient(nil)
-r.Set(ctx, "greeting", "hello", 0)
-value, err := r.Get(ctx, "greeting").Result()`,
-          },
-          {
-            label: "Node.js",
-            lang: "js",
-            code: `import Redis from "ioredis";
+    klyro "github.com/Hitesh-s0lanki/klyro/go"
+)
 
-const r = new Redis({ host: "localhost", port: 7171 });
-await r.set("greeting", "hello");
-console.log(await r.get("greeting"));`,
+ctx := context.Background()
+db := klyro.NewClient(nil)
+defer db.Close()
+
+if err := db.Set(ctx, "greeting", "hello", 0).Err(); err != nil {
+    log.Fatal(err)
+}
+value, err := db.Get(ctx, "greeting").Result()
+if err != nil {
+    log.Fatal(err)
+}
+log.Println(value)`,
           },
         ]}
         className="my-6"
       />
 
-      <h2 id="raw-commands">Sending raw MEM.* commands</h2>
-      <p>
-        Generic Redis clients do not know Klyro&apos;s memory family. Use the
-        raw-command call each client provides, or use a typed Klyro wrapper:
-      </p>
+      <h2 id="typed-client-shape">What the typed clients provide</h2>
       <RefTable
-        head={["Client", "Raw command call"]}
+        head={["Client", "Standard commands", "Memory commands", "Connection lifecycle"]}
         rows={[
-          ["redis-py", "r.execute_command(\"MEM.QUERY\", key, ...)"],
-          ["ioredis", "r.call(\"MEM.QUERY\", key, ...)"],
-          ["klyro-db (Python)", "r.memory.query(key, MemoryQuery(...))"],
-          ["klyro-db (TypeScript)", "r.memory.query(key, { ... })"],
-          ["klyro/go", "r.Memory.Query(ctx, key, klyro.QueryOptions{ ... })"],
-          ["go-redis", "r.Do(ctx, \"MEM.QUERY\", key, ...)"],
-          ["redis-rs", "redis::cmd(\"MEM.QUERY\").arg(key).query(&mut con)"],
+          ["TypeScript / JavaScript", "The returned ioredis instance", "memory and memoryBuffer", "connect (with lazyConnect), quit, disconnect"],
+          ["Python", "Klyro subclasses redis.Redis", "memory", "close, connection_pool.disconnect"],
+          ["Go", "Client embeds redis.UniversalClient", "Memory", "Close"],
         ]}
       />
+      <p>
+        The wrappers do not start the server. By default they connect to{" "}
+        <code>127.0.0.1:7171</code>. Connection, retry, timeout, TLS, and pool
+        settings are passed to ioredis, redis-py, or go-redis respectively;
+        only use settings that the Klyro server supports.
+      </p>
+
+      <h2 id="raw-commands">Using generic Redis clients</h2>
+      <p>
+        Generic Redis clients do not know Klyro&apos;s memory family. Use the
+        raw-command call each client provides for <code>MEM.*</code>. Standard
+        commands such as <code>GET</code>, <code>HSET</code>, and <code>LPUSH</code>
+        use the client&apos;s normal methods.
+      </p>
+      <RefTable
+        head={["Client", "Memory command call"]}
+        rows={[
+          ["redis-py", "r.execute_command(\"MEM.SEARCH\", \"notes\", \"database\")"],
+          ["ioredis", "r.call(\"MEM.SEARCH\", \"notes\", \"database\")"],
+          ["go-redis", "r.Do(ctx, \"MEM.SEARCH\", \"notes\", \"database\")"],
+          ["redis-rs", "redis::cmd(\"MEM.SEARCH\").arg(\"notes\").arg(\"database\").query(&mut con)"],
+        ]}
+      />
+
+      <p>
+        The typed equivalents are <code>db.memory.search</code> in TypeScript,
+        <code>db.memory.search</code> in Python, and{" "}
+        <code>db.Memory.Search</code> in Go. The complete method mapping is in{" "}
+        <a href="/docs/sdks#memory-methods">SDKs and packages</a>.
+      </p>
 
       <h2 id="sending-vectors">Sending vectors</h2>
       <p>
@@ -121,8 +163,8 @@ raw = redis.Redis(host="localhost", port=7171)
 raw.execute_command("MEM.ADD", "user:123", "TEXT", text, "VEC", vec(embedding))`,
           },
           {
-            label: "Node.js",
-            lang: "js",
+            label: "TypeScript",
+            lang: "ts",
             code: `const vec = (values) => Buffer.from(new Float32Array(values).buffer);
 
 await r.call("MEM.ADD", "user:123", "TEXT", text, "VEC", vec(embedding));
@@ -201,8 +243,9 @@ LPUSH mylist a
           <code>ERR unknown command</code>, which surfaces as an exception. The
           notable absences are scripting and the Stream, Bitmap, HyperLogLog,
           and Geo types. Klyro
-          also has no authentication, so leave the <code>password</code> option
-          unset.
+          also has no authentication or TLS termination, so leave credentials
+          unset and keep the server on a trusted network (or terminate TLS in a
+          private proxy).
         </p>
       </Callout>
     </>

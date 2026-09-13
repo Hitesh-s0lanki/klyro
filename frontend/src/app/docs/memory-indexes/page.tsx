@@ -3,6 +3,7 @@ import { DocHeader } from "@/components/docs/DocHeader";
 import { Callout } from "@/components/docs/Callout";
 import { RefTable } from "@/components/docs/Table";
 import { CodeBlock } from "@/components/ui/CodeBlock";
+import { CodeTabs } from "@/components/ui/CodeTabs";
 
 export const metadata: Metadata = {
   title: "Memory indexes",
@@ -27,17 +28,28 @@ export default function MemoryIndexesPage() {
         <code>COPY</code>, <code>KEYS</code>, <code>SCAN</code>, and{" "}
         <code>DBSIZE</code> all behave exactly as they do for a hash.
       </p>
-      <CodeBlock
-        lang="resp"
-        filename="klyro"
-        code={`MEM.CREATE user:123 MODE HYBRID DIM 384
-+OK
+      <CodeTabs
+        className="my-6"
+        tabs={[
+          { label: "TypeScript", lang: "ts", code: `await db.memory.create("user:123", { mode: "HYBRID", dim: 3 });
+console.log(await db.type("user:123"));
+await db.expire("user:123", 3600);
+await db.copy("user:123", "user:123:backup");` },
+          { label: "Python", lang: "python", code: `from klyro_db import MemoryCreate
+
+db.memory.create("user:123", MemoryCreate(mode="HYBRID", dim=3))
+print(db.type("user:123"))
+db.expire("user:123", 3600)
+db.copy("user:123", "user:123:backup")` },
+          { label: "Go", lang: "go", code: `if err := db.Memory.Create(ctx, "user:123", klyro.CreateOptions{Mode: klyro.Hybrid, Dim: 3}); err != nil { log.Fatal(err) }
+kind, err := db.Type(ctx, "user:123").Result()
+if err := db.Expire(ctx, "user:123", time.Hour).Err(); err != nil { log.Fatal(err) }
+copied, err := db.Copy(ctx, "user:123", "user:123:backup", 0, false).Result()` },
+          { label: "redis-cli", lang: "resp", code: `MEM.CREATE user:123 MODE HYBRID DIM 3
 TYPE user:123
-+memory
 EXPIRE user:123 3600
-:1
-COPY user:123 user:123:backup
-:1`}
+COPY user:123 user:123:backup` },
+        ]}
       />
       <p>
         The namespace you would otherwise configure is just the key.{" "}
@@ -153,10 +165,13 @@ MEM.EXPIRE session:abc 1 0
         lang="resp"
         filename="klyro"
         code={`MEM.INFO user:123
- 1) "mode"          2) "hybrid"
+ 1) "mode"          2) "HYBRID"
  3) "dim"           4) (integer) 384
- 5) "metric"        6) "cosine"
- 7) "weights"       8) "0.35 0.50 0.10 0.05"
+ 5) "metric"        6) "COSINE"
+ 7) "weights"       8) 1) "keyword"   2) "0.35"
+                         3) "vector"    4) "0.5"
+                         5) "recency"   6) "0.1"
+                         7) "importance" 8) "0.05"
  9) "halflife"     10) (integer) 604800
 11) "records"      12) (integer) 128
 13) "vectors"      14) (integer) 128

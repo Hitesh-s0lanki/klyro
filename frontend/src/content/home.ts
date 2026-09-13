@@ -139,7 +139,7 @@ PUBLISH deployments complete`,
     title: "Add ranked retrieval where it fits",
     body:
       "A memory index is optional. Use it for records that need BM25 keyword search, vector similarity, filters, or a weighted hybrid ranking.",
-    code: `MEM.QUERY user:123 TEXT "how do they ship?" FVEC 384 ... \\
+    code: `MEM.QUERY user:123 TEXT "how do they ship?" FVEC 3 0.10 0.79 0.46 \\
   TOPK 5 FILTER type EQ shipping FUSION LINEAR WITHSCORES`,
   },
 ] as const;
@@ -195,17 +195,17 @@ export const packages = [
 
 const klyro = createClient();
 
-await klyro.memory.create("user:123", { mode: "HYBRID", dim: 384 });
+await klyro.memory.create("user:123", { mode: "HYBRID", dim: 3 });
 await klyro.memory.add("user:123", {
   text: "User prefers PostgreSQL for backend projects.",
-  vector: embedding,
+  vector: [0.12, 0.81, 0.43],
   meta: { type: "preference" },
   importance: 0.85,
 });
 
 const hits = await klyro.memory.query("user:123", {
   text: "preferred database?",
-  vector: queryEmbedding,
+  vector: [0.10, 0.79, 0.46],
   topK: 5,
 });`,
   },
@@ -219,17 +219,17 @@ const hits = await klyro.memory.query("user:123", {
 
 klyro = Klyro(host="localhost", port=7171)
 
-klyro.memory.create("user:123", MemoryCreate(mode="HYBRID", dim=384))
+klyro.memory.create("user:123", MemoryCreate(mode="HYBRID", dim=3))
 klyro.memory.add("user:123", MemoryAdd(
     text="User prefers PostgreSQL for backend projects.",
-    vector=embedding,
+    vector=[0.12, 0.81, 0.43],
     metadata={"type": "preference"},
     importance=0.85,
 ))
 
 hits = klyro.memory.query("user:123", MemoryQuery(
     text="preferred database?",
-    vector=query_embedding,
+    vector=[0.10, 0.79, 0.46],
     top_k=5,
 ))`,
   },
@@ -245,16 +245,16 @@ db := klyro.NewClient(nil)
 
 db.Memory.Create(ctx, "user:123", klyro.CreateOptions{
   Mode: klyro.Hybrid,
-  Dim: 384,
+  Dim: 3,
 })
 db.Memory.Add(ctx, "user:123", klyro.AddOptions{
   Text: "User prefers PostgreSQL for backend projects.",
-  Vector: embedding,
+  Vector: []float32{0.12, 0.81, 0.43},
 })
 
 hits, err := db.Memory.Query(ctx, "user:123", klyro.QueryOptions{
   Text: "preferred database?",
-  Vector: queryEmbedding,
+  Vector: []float32{0.10, 0.79, 0.46},
   SearchOptions: klyro.SearchOptions{TopK: 5},
 })`,
   },

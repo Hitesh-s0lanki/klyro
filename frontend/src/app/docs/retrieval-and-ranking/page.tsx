@@ -3,6 +3,7 @@ import { DocHeader } from "@/components/docs/DocHeader";
 import { Callout } from "@/components/docs/Callout";
 import { RefTable } from "@/components/docs/Table";
 import { CodeBlock } from "@/components/ui/CodeBlock";
+import { CodeTabs } from "@/components/ui/CodeTabs";
 
 export const metadata: Metadata = {
   title: "Retrieval & ranking",
@@ -53,16 +54,38 @@ defaults  0.35        0.50      0.10        0.05`}
         queries or a narrow corpus.
       </p>
 
-      <CodeBlock
-        lang="resp"
-        filename="klyro"
-        code={`# Weight the semantic side harder, just for this query
-MEM.QUERY user:123 TEXT "shipping preferences" FVEC 384 ... \\
-  WEIGHTS 0.2 0.7 0.05 0.05 TOPK 5
+      <CodeTabs
+        className="my-6"
+        tabs={[
+          { label: "TypeScript", lang: "ts", code: `const hits = await db.memory.query("user:123", {
+  text: "shipping preferences",
+  vector: [0.10, 0.79, 0.46],
+  topK: 5,
+  weights: { keyword: 0.2, vector: 0.7, recency: 0.05, importance: 0.05 },
+  fusion: "RRF",
+  withScores: true,
+});` },
+          { label: "Python", lang: "python", code: `from klyro_db import MemoryQuery, Weights
 
-# Rank by position instead of score
-MEM.QUERY user:123 TEXT "shipping preferences" FVEC 384 ... \\
-  FUSION RRF TOPK 5`}
+hits = db.memory.query("user:123", MemoryQuery(
+    text="shipping preferences",
+    vector=[0.10, 0.79, 0.46],
+    top_k=5,
+    weights=Weights(keyword=0.2, vector=0.7, recency=0.05, importance=0.05),
+    fusion="RRF",
+    with_scores=True,
+))` },
+          { label: "Go", lang: "go", code: `weights := &klyro.Weights{Keyword: 0.2, Vector: 0.7, Recency: 0.05, Importance: 0.05}
+hits, err := db.Memory.Query(ctx, "user:123", klyro.QueryOptions{
+  Text: "shipping preferences",
+  Vector: []float32{0.10, 0.79, 0.46},
+  Weights: weights,
+  Fusion: klyro.RRF,
+  SearchOptions: klyro.SearchOptions{TopK: 5, WithScores: true},
+})` },
+          { label: "redis-cli", lang: "resp", code: `MEM.QUERY user:123 TEXT "shipping preferences" FVEC 3 0.10 0.79 0.46 \\
+  WEIGHTS 0.2 0.7 0.05 0.05 FUSION RRF TOPK 5 WITHSCORES` },
+        ]}
       />
 
       <h2 id="recency">Recency decay</h2>
