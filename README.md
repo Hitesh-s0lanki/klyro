@@ -5,6 +5,8 @@
 [![CI](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml/badge.svg)](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+[![Klyro homepage showing the Redis-compatible in-memory database and typed client examples](images/home.png)](https://python-psi-seven.vercel.app/)
+
 Klyro is an in-memory database written in Rust. It provides strings,
 lists, hashes, sets, and sorted sets for application state, plus
 transactions, pub/sub, blocking queues, expiry, snapshots, memory limits,
@@ -79,6 +81,8 @@ any changes since the last save.
 ## Install from npm
 
 No toolchain needed - npm downloads a prebuilt binary for your machine:
+
+![Klyro installation documentation with npm and platform package instructions](images/install.png)
 
 ```sh
 npx klyro-db                      # port 7171, dump file klyro.dump
@@ -155,6 +159,8 @@ name bypass all three and go straight to the binary. See
 
 The marketing site and the documentation live in [frontend/](frontend/), a
 Next.js app using Tailwind CSS and shadcn/ui:
+
+[![Klyro quickstart documentation showing navigation and Docker setup](images/docs.png)](https://python-psi-seven.vercel.app/docs/quickstart)
 
 ```sh
 cd frontend
