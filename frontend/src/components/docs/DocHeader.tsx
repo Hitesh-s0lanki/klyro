@@ -16,11 +16,11 @@ export function DocHeader({
           {eyebrow}
         </p>
       )}
-      <h1 className="text-[2.1rem] font-semibold leading-tight tracking-tight text-ink">
+      <h1 className="text-balance text-[2.1rem] font-semibold leading-tight tracking-tight text-ink">
         {title}
       </h1>
       {lead && (
-        <p className="mt-4 max-w-2xl text-[16px] leading-relaxed text-ink-muted">{lead}</p>
+        <p className="mt-4 max-w-2xl text-pretty text-[16px] leading-relaxed text-ink-muted">{lead}</p>
       )}
     </header>
   );

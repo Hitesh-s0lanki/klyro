@@ -1,15 +1,16 @@
 # Klyro
 
-**The high-performance in-memory data server.**
+**A practical in-memory database with a familiar Redis interface.**
 
 [![CI](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml/badge.svg)](https://github.com/Hitesh-s0lanki/klyro/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-An in-memory, Redis-style data server in Rust, with String, List, Hash,
-Set, and Sorted Set data types - plus **Memory**, a retrieval structure
-for AI agents that indexes text and embeddings together and ranks by
-keyword relevance, semantic similarity, recency, and importance in one
-query. See [the memory commands](#memory-indexes) and
+Klyro is an in-memory database written in Rust. It provides strings,
+lists, hashes, sets, and sorted sets for application state, plus
+transactions, pub/sub, blocking queues, expiry, snapshots, memory limits,
+and eviction policies. Its optional **Memory** type adds keyword, vector,
+and hybrid retrieval in the same keyspace. See
+[the memory commands](#memory-indexes) and
 [docs/memory-structures.md](docs/memory-structures.md).
 
 **It speaks RESP, so any Redis client library works** - redis-py,
@@ -44,7 +45,7 @@ under [tests/](tests/): spawns real `klyro` server subprocesses, talks
 RESP to them over a real socket, and checks every command's reply type,
 WRONGTYPE errors, binary-safe values, pipelining, protocol errors,
 `KEYS`/`SCAN` pattern matching, memory index retrieval and ranking, and
-a full persistence round-trip (save, kill, reload). 382 tests in all.
+a full persistence round-trip (save, kill, reload). 492 tests in all.
 `cargo test` builds first, so a plain
 `cargo test` from a clean checkout is enough.
 
@@ -102,7 +103,7 @@ docker run -d --name klyro -p 7171:7171 -v klyro-data:/data \
     ghcr.io/hitesh-s0lanki/klyro:latest
 ```
 
-Tags are `latest`, the version from `Cargo.toml` (`0.1.0`, and `0.1`),
+Tags are `latest`, the version from `Cargo.toml` (`0.1.1`, and `0.1`),
 and `sha-<commit>` for a specific build. Pin the version tag for
 anything you care about. To build it yourself instead:
 
@@ -678,8 +679,8 @@ comparison against Redis. The ones worth knowing before you use this:
 - No scripting (`EVAL`), so the only server-side atomic
   read-modify-write is what a single command or a `WATCH`-guarded
   transaction gives you.
-- Only the 145 commands listed above. A client library will happily
-  call anything else and get back `ERR unknown command`.
+- Klyro implements the 145 commands listed above. Other commands return
+  `ERR unknown command`.
 - No keyspace notifications (`notify-keyspace-events`), so pub/sub
   carries only what clients publish to it.
 - Memory indexes do not embed text: the client supplies the vector.
@@ -702,7 +703,8 @@ comparison against Redis. The ones worth knowing before you use this:
 - RESP3 push messages carry pub/sub deliveries, but there is no
   client-side caching (`CLIENT TRACKING`) to invalidate over them.
 - `SCAN`'s cursor is a position in a sorted snapshot of the keyspace, so
-  each call costs O(n log n) rather than the O(1) a real `SCAN` gives.
+  each call costs O(n log n). Redis uses a different cursor implementation
+  with O(1) work per call.
 
 ## License
 

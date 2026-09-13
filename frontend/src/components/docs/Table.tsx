@@ -39,7 +39,7 @@ export function RefTable({
         </TableHeader>
         <TableBody>
           {rows.map((row, rowIndex) => (
-            <TableRow key={rowIndex} className="border-line-soft align-top hover:bg-surface/40">
+            <TableRow key={rowIndex} className="border-line-soft align-top hover:bg-surface-2/50">
               {row.map((cell, cellIndex) => (
                 <TableCell
                   key={cellIndex}

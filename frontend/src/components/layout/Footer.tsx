@@ -6,14 +6,14 @@ import { footerNav, site } from "@/lib/site";
 
 export function Footer() {
   return (
-    <footer className="border-t border-line-soft bg-surface/40">
+    <footer className="border-t border-line-soft bg-surface">
       <div className="mx-auto w-full max-w-6xl px-5 py-14 sm:px-8">
         <div className="grid gap-10 md:grid-cols-[1.4fr_repeat(3,1fr)]">
           <div>
             <Logo />
             <p className="mt-4 max-w-xs text-[13.5px] leading-relaxed text-ink-muted">
-              An in-memory data server with a native memory type for AI agents.
-              Open source, single binary, Redis-compatible wire protocol.
+              An open-source in-memory database for application state, queues,
+              pub/sub, and ranked retrieval. One binary, one RESP endpoint.
             </p>
             <a
               href={site.repo}
@@ -51,7 +51,7 @@ export function Footer() {
         <div className="flex flex-col gap-3 pt-6 text-[12.5px] text-ink-faint sm:flex-row sm:items-center sm:justify-between">
           <p>© {new Date().getFullYear()} Klyro. Released under the MIT license.</p>
           <p className="font-mono">
-            v0.1.0 · default port {site.defaultPort} · RESP2 / RESP3
+            v0.1.1 · default port {site.defaultPort} · RESP2 / RESP3
           </p>
         </div>
       </div>

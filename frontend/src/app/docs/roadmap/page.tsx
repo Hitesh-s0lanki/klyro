@@ -22,13 +22,14 @@ export default function RoadmapPage() {
         head={["Milestone", "Detail"]}
         rows={[
           ["RESP2 and RESP3", "Binary-safe values, matching reply shapes, verified against redis-py, go-redis, and ioredis"],
-          ["Five classic types", "107 Redis-shaped commands across strings, lists, hashes, sets, and sorted sets"],
+          ["Five classic types", "130 Redis-shaped commands across data structures, transactions, pub/sub, and connection features"],
           ["Memory as a native type", "Three modes, 15 MEM.* commands, filters, fusion, per-record TTL"],
           ["Dump format v3", "Memory indexes persist and reload; v1 and v2 dumps still load"],
           ["Configuration surface", "Config file, command line, CONFIG GET/SET, and an INFO memorydb section"],
           ["Transactions and pub/sub", "MULTI/EXEC/WATCH, channel and pattern subscriptions, and the blocking pops"],
           ["maxmemory and eviction", "All eight Redis policies, approximate sampling, and an OOM refusal for writes that could grow the keyspace"],
           ["Container image", "Two-stage static musl build, ~15 MB, unprivileged, with a protocol-level healthcheck"],
+          ["TypeScript, Python, and Go clients", "Typed helpers cover all 15 MEM.* commands"],
         ]}
       />
 
@@ -36,7 +37,7 @@ export default function RoadmapPage() {
       <RefTable
         head={["Item", "Why"]}
         rows={[
-          ["Official SDKs", "Typed clients so vectors, metadata, and filters stop being positional strings"],
+          ["Rust memory wrapper", "Bring the typed MEM.* surface to Rust applications"],
           ["REST gateway", "A thin separate binary speaking RESP to Klyro, for callers that want HTTP"],
           ["Approximate vector index", "Lifts the exact-scan ceiling so an index can hold far more than tens of thousands of records"],
           ["Built-in embedding provider", "So MEM.ADD can accept text alone, with the model still swappable"],
@@ -66,7 +67,7 @@ export default function RoadmapPage() {
 
       <Callout variant="note" title="Versioning">
         <p>
-          Klyro is 0.1.0. Command shapes may still change between minor versions
+          Klyro is 0.1.1. Command shapes may still change between minor versions
           where the current shape turns out to be wrong. The dump format is
           versioned and older dumps keep loading, so an upgrade never asks you to
           re-import.

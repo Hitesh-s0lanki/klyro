@@ -26,14 +26,16 @@ export const metadata: Metadata = {
   },
   description: site.description,
   keywords: [
-    "AI memory",
-    "agent memory",
+    "in-memory database",
+    "Redis-compatible database",
+    "key-value database",
+    "cache server",
+    "pub/sub",
+    "work queue",
     "vector database",
     "hybrid search",
-    "BM25",
     "Redis protocol",
     "RESP",
-    "in-memory database",
   ],
   openGraph: {
     title: `${site.name} — ${site.tagline}`,
@@ -51,7 +53,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={cn("dark", inter.variable, jetbrains.variable, "font-sans")}>
+    <html lang="en" className={cn(inter.variable, jetbrains.variable, "font-sans")}>
       <body className="min-h-screen antialiased">
         <a
           href="#main"

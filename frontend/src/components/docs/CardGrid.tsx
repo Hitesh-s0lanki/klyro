@@ -33,10 +33,10 @@ export function LinkCard({
   children: ReactNode;
 }) {
   const card = (
-    <Card className="group/link h-full rounded-card bg-surface/40 py-5 transition hover:bg-surface/70 hover:ring-brand/40">
+    <Card className="group/link h-full rounded-card bg-surface py-5 transition hover:bg-surface-2/50 hover:ring-brand/40">
       <CardHeader className="grid-cols-[1fr_auto] items-center gap-x-3">
-        <CardTitle className="text-[14.5px] font-semibold text-ink">{title}</CardTitle>
-        <ArrowRightIcon className="size-4 text-ink-faint transition group-hover/link:translate-x-0.5 group-hover/link:text-brand-bright" />
+        <CardTitle className="min-w-0 text-[14.5px] leading-snug font-semibold text-ink">{title}</CardTitle>
+        <ArrowRightIcon className="size-4 shrink-0 text-ink-faint transition group-hover/link:translate-x-0.5 group-hover/link:text-brand-bright" />
         <CardDescription className="col-span-2 text-[13px] leading-relaxed">
           {children}
         </CardDescription>

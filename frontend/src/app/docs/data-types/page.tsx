@@ -5,7 +5,7 @@ import { RefTable } from "@/components/docs/Table";
 
 export const metadata: Metadata = {
   title: "Data type commands",
-  description: "The 107 Redis-shaped commands Klyro implements across strings, lists, hashes, sets, sorted sets, and the generic keyspace.",
+  description: "The 130 Redis-shaped commands Klyro implements across data structures, transactions, pub/sub, blocking operations, and the generic keyspace.",
 };
 
 export default function DataTypesPage() {
@@ -14,7 +14,7 @@ export default function DataTypesPage() {
       <DocHeader
         eyebrow="Reference"
         title="Data type commands"
-        lead="Klyro implements 122 commands: 107 Redis-shaped ones plus the 15 MEM.* commands. Reply types match Redis's, which is what lets stock client libraries decode them."
+        lead="Klyro implements 145 commands: 130 Redis-shaped commands plus the 15-command MEM.* family. Matching RESP reply shapes let standard client libraries decode the results."
       />
 
       <h2 id="generic">Generic (any type)</h2>

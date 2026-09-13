@@ -87,7 +87,7 @@ export function Header() {
           >
             <MenuIcon />
           </SheetTrigger>
-          <SheetContent side="right" className="w-[17rem] max-w-[85vw] bg-canvas">
+          <SheetContent side="right" className="w-[17rem] max-w-[85vw] bg-surface">
             <SheetHeader>
               <SheetTitle>Klyro</SheetTitle>
             </SheetHeader>
@@ -97,7 +97,7 @@ export function Header() {
                   key={item.href}
                   href={item.href}
                   onClick={() => setOpen(false)}
-                  className="rounded-md px-2 py-2.5 text-sm text-ink-muted transition hover:bg-surface hover:text-ink"
+                  className="rounded-md px-2 py-2.5 text-sm text-ink-muted transition hover:bg-surface-2 hover:text-ink"
                 >
                   {item.label}
                 </Link>

@@ -48,9 +48,9 @@ klyro 7200 data.dump`,
         className="my-6"
       />
       <p>
-        <code>klyro-db</code> is a launcher plus one platform&apos;s build. The
-        binaries ship as separate packages, one per platform, and npm installs
-        only the one that matches:
+        <code>klyro-db</code> includes the typed TypeScript client and the CLI
+        launcher. The native binaries ship as separate packages, and npm
+        installs only the one that matches your platform:
       </p>
       <RefTable
         head={["Platform", "Package"]}
@@ -70,6 +70,21 @@ klyro 7200 data.dump`,
         </p>
       </Callout>
 
+      <h2 id="client-packages">Typed client packages</h2>
+      <p>
+        These packages connect application code to a running Klyro server and
+        cover every current <code>MEM.*</code> command with typed inputs and
+        decoded replies.
+      </p>
+      <CodeTabs
+        tabs={[
+          { label: "TypeScript", lang: "bash", code: "npm install klyro-db@0.1.1" },
+          { label: "Python", lang: "bash", code: "pip install klyro-db==0.1.1" },
+          { label: "Go", lang: "bash", code: "go get github.com/Hitesh-s0lanki/klyro/go" },
+        ]}
+        className="my-6"
+      />
+
       <h2 id="docker">Docker</h2>
       <p>
         Every merge to <code>main</code> publishes an image, so there is usually
@@ -83,7 +98,7 @@ klyro 7200 data.dump`,
       />
       <p>
         Tags are <code>latest</code>, the version from <code>Cargo.toml</code>{" "}
-        (<code>0.1.0</code> and <code>0.1</code>), and{" "}
+        (<code>0.1.1</code> and <code>0.1</code>), and{" "}
         <code>sha-&lt;commit&gt;</code> for a specific build. Pin the version tag
         for anything you care about.
       </p>
@@ -161,7 +176,7 @@ cargo run --release -- 7171 klyro.dump
             code: `# unit tests in src/ plus the integration suite in tests/
 cargo test
 
-# 382 tests: each integration test spawns its own klyro
+# 492 tests: each integration test spawns its own klyro
 # subprocess and speaks RESP to it over a real socket.`,
           },
         ]}
@@ -186,7 +201,7 @@ cargo test
 INFO server
 $...
 # server
-klyro_version:0.1.0
+klyro_version:0.1.1
 tcp_port:7171
 
 MEM.CREATE smoke:test MODE HYBRID DIM 4

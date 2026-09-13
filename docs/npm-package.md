@@ -37,7 +37,7 @@ The published set:
 
 | Package | Contents |
 |---|---|
-| `klyro-db` | The launcher, ~3 kB |
+| `klyro-db` | CLI launcher, typed client and memory helpers |
 | `klyro-db-darwin-arm64` | Apple silicon binary |
 | `klyro-db-darwin-x64` | Intel Mac binary |
 | `klyro-db-linux-arm64` | Linux arm64, glibc |
@@ -65,7 +65,7 @@ Docker image, which is already musl-static.
 
 ## The launcher
 
-`npm/klyro-db/bin/klyro.js` is the only code in the wrapper. It builds
+`npm/klyro-db/bin/klyro.js` implements the CLI launcher. It builds
 the platform package's name from `process.platform` and `process.arch` -
 the same strings npm matched `os` and `cpu` against - resolves that
 package's `package.json`, and executes the binary beside it.
@@ -144,3 +144,22 @@ Automation tokens bypass 2FA, which is what a CI publish needs.
 The publish job also has `id-token: write`, which lets `npm publish
 --provenance` attest that these tarballs were built by this workflow
 from this commit. The provenance badge on the npm page comes from that.
+
+## TypeScript client validation
+
+The wrapper exports `createClient()` from `index.js`, with declarations in
+`index.d.ts`. Standard commands use ioredis types. `memory.js` implements
+all 15 current MEM commands, decodes maps and numeric scores, and preserves
+binary vectors by requesting Buffer replies. `memoryBuffer` also preserves
+binary IDs, text and metadata.
+
+After assembling the wrapper and the platform package for your machine, run:
+
+```sh
+node npm/tests/client.mjs
+```
+
+This installs actual tarballs into a temporary project, checks valid and
+invalid TypeScript consumers in ESM and CommonJS modes, and exercises the
+client against the packaged server. It covers all memory helpers, nulls,
+return flags, vector encoding, binary metadata, and server errors.

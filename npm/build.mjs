@@ -148,13 +148,19 @@ function buildWrapper() {
                 // readily as the `klyro` command the install leaves
                 // behind.
                 bin: { [COMMAND]: `bin/${COMMAND}.js`, [WRAPPER]: `bin/${COMMAND}.js` },
-                files: ["bin"],
+                main: "./index.js",
+                types: "./index.d.ts",
+                files: ["bin", "index.js", "index.d.ts", "memory.js"],
+                dependencies: { ioredis: "^5.11.1" },
                 optionalDependencies,
             },
             null,
             2,
         )}\n`,
         [`bin/${COMMAND}.js`]: { copy: join(ROOT, "npm", WRAPPER, "bin", `${COMMAND}.js`), executable: true },
+        "memory.js": { copy: join(ROOT, "npm", WRAPPER, "memory.js") },
+        "index.js": { copy: join(ROOT, "npm", WRAPPER, "index.js") },
+        "index.d.ts": { copy: join(ROOT, "npm", WRAPPER, "index.d.ts") },
         "LICENSE": { copy: join(ROOT, "LICENSE") },
         "README.md": { copy: join(ROOT, "npm", WRAPPER, "README.md") },
     });

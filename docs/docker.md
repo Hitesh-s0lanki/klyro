@@ -89,18 +89,37 @@ directory to be writable by uid 10001, or the first save fails.
 builds and pushes on every merge to `main`, and on demand from the
 Actions tab.
 
-The registry is GitHub's own, `ghcr.io`, which needs no secrets: the
-workflow logs in with the `GITHUB_TOKEN` that Actions already provides,
-given `packages: write`. Pushing to Docker Hub instead is a change of
-`REGISTRY` plus a username/token pair in the repository secrets. Note
-that the first push creates a *private* package - making it public is a
-one-time change in the repository's package settings.
+It publishes to two registries from one build. GitHub's own `ghcr.io`
+needs no secrets: the workflow logs in with the `GITHUB_TOKEN` that
+Actions already provides, given `packages: write`. Note that the first
+push there creates a *private* package - making it public is a one-time
+change in the repository's package settings.
+
+Docker Hub is the second, and it is opt-in, because it needs real
+credentials that a fork will not have. Three repository settings turn it
+on:
+
+| Setting | Kind | What it is |
+| --- | --- | --- |
+| `DOCKERHUB_NAMESPACE` | variable | The user or organisation to publish under. The image becomes `<namespace>/klyro`. |
+| `DOCKERHUB_USERNAME` | secret | The account the token belongs to. Not always the namespace - an organisation is pushed to by one of its members. |
+| `DOCKERHUB_TOKEN` | secret | An access token from Docker Hub's security settings, with write scope. Not the account password. |
+
+The variable is what gates it. Left unset, the Docker Hub login is
+skipped and the run publishes to `ghcr.io` alone, so a fork without the
+secrets still gets a working build rather than a credentials failure.
+
+Unlike `ghcr.io`, Docker Hub does not create the repository's
+description or its public/private setting from the push - the first push
+creates a public repository under a personal namespace, and the rest of
+the listing is filled in on Docker Hub itself.
 
 The version comes from `[package] version` in `Cargo.toml`, so bumping
-that line is what cuts a new tag. Every build gets four: the full
-version, major.minor, `latest`, and `sha-<commit>`. Merges that don't
-bump the version overwrite the first three, which is why the `sha-` tag
-exists - it is the only immutable handle on a particular build.
+that line is what cuts a new tag. Every build gets four, on each
+registry: the full version, major.minor, `latest`, and `sha-<commit>`.
+Merges that don't bump the version overwrite the first three, which is
+why the `sha-` tag exists - it is the only immutable handle on a
+particular build.
 
 Images are built for `linux/amd64` and `linux/arm64`. The arm64 half is
 emulated with QEMU, which is slow for compilation in general but barely

@@ -93,7 +93,7 @@ SHUTDOWN
 
       <Callout variant="warning" title="Snapshot only">
         <p>
-          There is no append-only log and no replication in 0.1.0. If losing up
+          There is no append-only log and no replication in 0.1.1. If losing up
           to a minute of writes is unacceptable, lower{" "}
           <code>save-interval</code>, and treat the dump as what it is: a
           periodic snapshot, not a durable transaction log.
