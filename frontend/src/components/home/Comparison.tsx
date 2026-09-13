@@ -36,8 +36,8 @@ export function Comparison() {
     <Section id="comparison">
       <SectionHeading
         eyebrow="Comparison"
-        title="Against the stacks it replaces"
-        description="Both alternatives work. The difference is how many moving parts you operate, and how much of the ranking logic ends up in your application instead of your database."
+        title="Core data structures, with search when you need it"
+        description="Use the standard keyspace for application state and coordination. Add a memory index when records need keyword, vector, recency, or importance ranking."
       />
 
       <div className="scroll-slim mt-12 overflow-hidden rounded-card ring-1 ring-line">
@@ -62,7 +62,7 @@ export function Comparison() {
           </TableHeader>
           <TableBody>
             {comparison.rows.map((row) => (
-              <TableRow key={row.label} className="border-line-soft hover:bg-surface/40">
+              <TableRow key={row.label} className="border-line-soft hover:bg-surface-2/50">
                 <TableCell className="px-5 py-3.5 text-[13.5px] font-medium whitespace-normal text-ink">
                   {row.label}
                 </TableCell>

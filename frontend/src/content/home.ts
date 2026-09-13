@@ -2,179 +2,143 @@ import type { CodeTab } from "@/components/ui/CodeTabs";
 
 /**
  * Copy for the marketing page. Command shapes and numbers match the
- * server as built; the SDK package names are placeholders until the
- * packages are published.
+ * server as built; registry coordinates are marked where packages are published.
  */
 
 export const heroTabs: CodeTab[] = [
   {
     label: "Python",
     lang: "python",
-    code: `import redis
+    code: `from klyro_db import Klyro
 
-r = redis.Redis(host="localhost", port=7171, decode_responses=True)
+db = Klyro()
+db.set("session:42", "active", ex=900)
+db.hset("user:42", mapping={"name": "Ari", "plan": "pro"})
+db.lpush("jobs", "generate-report")
 
-# One key holds one memory index.
-r.execute_command("MEM.CREATE", "user:123", "MODE", "HYBRID", "DIM", "384")
-
-# Store a memory: text, its embedding, metadata, importance.
-r.execute_command(
-    "MEM.ADD", "user:123",
-    "TEXT", "User prefers PostgreSQL for backend projects.",
-    "FVEC", 384, *embedding,
-    "META", "type", "preference",
-    "IMPORTANCE", 0.85,
-)
-
-# Retrieve: keyword + semantic + recency + importance, fused.
-hits = r.execute_command(
-    "MEM.QUERY", "user:123",
-    "TEXT", "what database does the user prefer?",
-    "FVEC", 384, *query_embedding,
-    "TOPK", 5,
-    "FILTER", "type", "EQ", "preference",
-    "WITHSCORES",
-)`,
+status = db.get("session:42")
+profile = db.hgetall("user:42")
+job = db.brpop("jobs", timeout=5)`,
   },
   {
-    label: "Node.js",
-    lang: "js",
-    code: `import Redis from "ioredis";
+    label: "TypeScript",
+    lang: "ts",
+    code: `import { createClient } from "klyro-db";
 
-const r = new Redis({ host: "localhost", port: 7171 });
+const db = createClient();
+await db.set("session:42", "active", "EX", 900);
+await db.hset("user:42", { name: "Ari", plan: "pro" });
+await db.lpush("jobs", "generate-report");
 
-await r.call("MEM.CREATE", "user:123", "MODE", "HYBRID", "DIM", "384");
-
-await r.call(
-  "MEM.ADD", "user:123",
-  "TEXT", "User prefers PostgreSQL for backend projects.",
-  "VEC", Buffer.from(new Float32Array(embedding).buffer),
-  "META", "type", "preference",
-  "IMPORTANCE", "0.85",
-);
-
-const hits = await r.call(
-  "MEM.QUERY", "user:123",
-  "TEXT", "what database does the user prefer?",
-  "VEC", Buffer.from(new Float32Array(queryEmbedding).buffer),
-  "TOPK", "5",
-  "WITHSCORES",
-);`,
+const status = await db.get("session:42");
+const profile = await db.hgetall("user:42");
+const job = await db.brpop("jobs", 5);`,
   },
   {
     label: "Go",
     lang: "go",
-    code: `import "github.com/redis/go-redis/v9"
+    code: `import klyro "github.com/Hitesh-s0lanki/klyro/go"
 
-r := redis.NewClient(&redis.Options{Addr: "localhost:7171"})
+r := klyro.NewClient(nil)
 
-r.Do(ctx, "MEM.CREATE", "user:123", "MODE", "HYBRID", "DIM", 384)
+r.Set(ctx, "session:42", "active", 15*time.Minute)
+r.HSet(ctx, "user:42", "name", "Ari", "plan", "pro")
+r.LPush(ctx, "jobs", "generate-report")
 
-r.Do(ctx, "MEM.ADD", "user:123",
-    "TEXT", "User prefers PostgreSQL for backend projects.",
-    "VEC", float32Bytes(embedding),
-    "META", "type", "preference",
-    "IMPORTANCE", 0.85)
-
-hits, err := r.Do(ctx, "MEM.QUERY", "user:123",
-    "TEXT", "what database does the user prefer?",
-    "VEC", float32Bytes(queryEmbedding),
-    "TOPK", 5, "WITHSCORES").Result()`,
+status, err := r.Get(ctx, "session:42").Result()
+profile, err := r.HGetAll(ctx, "user:42").Result()
+job, err := r.BRPop(ctx, 5*time.Second, "jobs").Result()`,
   },
   {
     label: "redis-cli",
     lang: "resp",
-    code: `MEM.CREATE user:123 MODE HYBRID DIM 4
+    code: `SET session:42 active EX 900
 +OK
-MEM.ADD user:123 TEXT "User prefers PostgreSQL." FVEC 4 0.1 0.9 0.2 0.4 META type preference IMPORTANCE 0.85
-$1
-1
-MEM.QUERY user:123 TEXT "preferred database" FVEC 4 0.1 0.8 0.2 0.5 TOPK 3 WITHSCORES
-1) "1"
-2) "User prefers PostgreSQL."
-3) 0.91423`,
+HSET user:42 name Ari plan pro
+(integer) 2
+LPUSH jobs generate-report
+(integer) 1
+BRPOP jobs 5
+1) "jobs"
+2) "generate-report"`,
   },
 ];
 
 export const features = [
   {
-    icon: "Layers",
-    title: "Hybrid retrieval in one query",
-    body:
-      "Keyword relevance and semantic similarity are scored against the same records and fused into one ranking. No second store to keep in sync, no application-side merge step.",
-  },
-  {
-    icon: "Sparkles",
-    title: "BM25 keyword scoring",
-    body:
-      "A real inverted index with BM25 ranking, not a substring match. Exact terms — names, error codes, SKUs — stay findable when embeddings blur them together.",
-  },
-  {
     icon: "Database",
-    title: "Bring your own embeddings",
+    title: "Six native data types",
     body:
-      "Send float32 vectors from whichever model you use, with cosine, L2, or inner-product scoring. The model changes every few months; your index does not have to.",
-  },
-  {
-    icon: "Clock",
-    title: "Recency and importance built in",
-    body:
-      "Every record carries a timestamp and an importance weight. Recency decays on a configurable half-life, so an agent's newest memories outrank its stalest ones by default.",
-  },
-  {
-    icon: "Filter",
-    title: "Filters that run before scoring",
-    body:
-      "Repeated FILTER triples over metadata and record fields, ANDed, with EQ, NE, GT, GTE, LT, LTE, IN, and CONTAINS. Filtering first keeps a query off the whole namespace.",
+      "Store simple values, queues, objects, unique members, rankings, and searchable records in one keyspace. Choose the type that matches the data.",
   },
   {
     icon: "Zap",
-    title: "Three modes, one type",
+    title: "Transactions and optimistic locking",
     body:
-      "SEARCH for keyword-only, VECTOR for semantic-only, HYBRID for both. A mode that cannot serve a query says so rather than silently returning worse results.",
+      "Group commands with MULTI and EXEC. Use WATCH when an update depends on the current value, or DISCARD to abandon queued work.",
   },
   {
     icon: "Plug",
-    title: "Any Redis client works",
+    title: "Pub/sub and blocking queues",
     body:
-      "Klyro speaks RESP2 and RESP3. redis-py, ioredis, and go-redis are verified against it, redis-cli included. There is no Klyro-specific driver to install.",
+      "Publish live events by channel or pattern. Let workers block on lists or sorted sets until new work arrives.",
+  },
+  {
+    icon: "Clock",
+    title: "Expiry on keys and records",
+    body:
+      "Expire keys in seconds or milliseconds. Searchable records can have their own TTL without removing the index that contains them.",
   },
   {
     icon: "ShieldCheck",
-    title: "Per-record TTL and durability",
+    title: "Snapshots and graceful shutdown",
     body:
-      "Records expire independently of the key that holds them, so a session memory can lapse without dropping the index. Snapshots are atomic and reload on start.",
+      "Load a snapshot at startup and save on demand, on a schedule, or during graceful shutdown. Each save replaces the previous file atomically.",
   },
   {
-    icon: "Box",
-    title: "One 15 MB container",
+    icon: "Layers",
+    title: "Memory limits and eviction",
     body:
-      "A static musl binary on bare Alpine, running unprivileged, with a healthcheck that PINGs over the real protocol. One dependency in the whole crate: libc.",
+      "Set a memory ceiling, then choose no eviction or an LRU, LFU, random, or TTL-based policy for selecting keys to remove.",
+  },
+  {
+    icon: "Sparkles",
+    title: "Text and vector indexes when needed",
+    body:
+      "Create SEARCH, VECTOR, or HYBRID indexes alongside ordinary keys. Combine BM25, vector similarity, recency, importance, and metadata filters.",
+  },
+  {
+    icon: "Filter",
+    title: "RESP clients and typed packages",
+    body:
+      "Connect with redis-py, ioredis, go-redis, redis-rs, or redis-cli. Klyro also provides typed memory helpers for TypeScript, Python, and Go.",
   },
 ] as const;
 
 export const steps = [
   {
     number: "01",
-    title: "Create an index",
+    title: "Write application state",
     body:
-      "A memory index is a key like any other. Pick a mode, a dimension, a metric, and the weights that decide how the four signals combine.",
-    code: `MEM.CREATE user:123 MODE HYBRID DIM 384 METRIC COSINE \\
-  WEIGHTS 0.35 0.50 0.10 0.05 HALFLIFE 604800`,
+      "Keys need no schema. Store a temporary value as a string, a profile as a hash, or unique members in a set.",
+    code: `SET session:42 active EX 900
+HSET user:42 name Ari plan pro
+SADD online-users 42`,
   },
   {
     number: "02",
-    title: "Write memories",
+    title: "Coordinate workers and events",
     body:
-      "Each record is text plus an optional vector, flat metadata, an importance score, and its own TTL. Klyro assigns the id unless you supply one.",
-    code: `MEM.ADD user:123 TEXT "Ships to Berlin, prefers DHL." \\
-  FVEC 384 0.02 0.41 ... META type shipping IMPORTANCE 0.7 TTL 86400`,
+      "Use blocking list operations for work queues, pub/sub for live events, and MULTI/EXEC when a group of commands must run together.",
+    code: `LPUSH jobs generate-report
+BRPOP jobs 5
+PUBLISH deployments complete`,
   },
   {
     number: "03",
-    title: "Query and rank",
+    title: "Add ranked retrieval where it fits",
     body:
-      "MEM.QUERY runs a keyword search given text, a semantic search given a vector, and fuses both when given the pair. WITHSCORES returns the parts.",
+      "A memory index is optional. Use it for records that need BM25 keyword search, vector similarity, filters, or a weighted hybrid ranking.",
     code: `MEM.QUERY user:123 TEXT "how do they ship?" FVEC 384 ... \\
   TOPK 5 FILTER type EQ shipping FUSION LINEAR WITHSCORES`,
   },
@@ -182,56 +146,56 @@ export const steps = [
 
 export const benefits = [
   {
-    title: "Cut the memory stack from three services to one",
+    title: "Keep common state behind one endpoint",
     body:
-      "The usual agent memory setup is a relational store for records, a vector database for embeddings, and a cache in front of both. Klyro is one process that holds all three roles, so there is no dual-write path and nothing to reconcile when a write lands in one store and fails in another.",
-    metric: "3 services → 1",
+      "Sessions, counters, profiles, queues, sets, leaderboards, and searchable records share one keyspace, one persistence path, and one port.",
+    metric: "1 keyspace",
   },
   {
-    title: "Ship it with the client you already have",
+    title: "Use familiar Redis commands",
     body:
-      "No SDK lock-in, no new transport, no HTTP layer to secure. If your language has a Redis client — and every language does — it can already talk to Klyro. Onboarding is a connection string, not a migration.",
-    metric: "0 new drivers",
+      "Standard commands work through existing Redis clients. TypeScript, Python, and Go also have typed helpers for Klyro's MEM.* command family.",
+    metric: "RESP2 / RESP3",
   },
   {
-    title: "Sub-millisecond reads, in process memory",
+    title: "Control how RAM is used",
     body:
-      "Everything lives in RAM behind a single-threaded event loop, so commands run to completion without lock contention or a network hop to a second tier. Retrieval latency stops being the reason your agent feels slow.",
-    metric: "In-RAM reads",
+      "Configure a memory ceiling and choose the eviction policy that matches a cache, session store, or durable in-memory workload.",
+    metric: "8 eviction policies",
   },
   {
-    title: "Recall you can actually explain",
+    title: "Persist without adding another service",
     body:
-      "WITHSCORES breaks a fused result into its keyword, vector, recency, and importance parts. When an agent surfaces the wrong memory, you can see which signal caused it and change one weight instead of guessing at a prompt.",
-    metric: "4 signals, itemised",
+      "Klyro reloads snapshots at startup and writes them on SAVE, graceful shutdown, or the configured automatic interval.",
+    metric: "Atomic snapshots",
   },
 ] as const;
 
 export const comparison = {
-  columns: ["Klyro", "Postgres + pgvector", "Vector DB + cache"],
+  columns: ["Core database", "Memory extension"],
   rows: [
-    { label: "Keyword (BM25) ranking", values: [true, "tsvector, separate index", false] },
-    { label: "Semantic search", values: [true, true, true] },
-    { label: "Hybrid fusion built in", values: [true, false, "app-side"] },
-    { label: "Recency & importance weighting", values: [true, false, false] },
-    { label: "Works with existing clients", values: [true, "SQL driver", "vendor SDK"] },
-    { label: "Sub-millisecond in-memory reads", values: [true, false, "cache only"] },
-    { label: "Services to operate", values: ["1", "1", "2+"] },
-    { label: "Per-record TTL", values: [true, "cron job", "partial"] },
+    { label: "Data model", values: ["Strings and collections", "Text, vectors, metadata"] },
+    { label: "Primary commands", values: ["GET, HSET, LPUSH, ZADD", "MEM.ADD, MEM.QUERY"] },
+    { label: "Expiry", values: ["Per key", "Per index and per record"] },
+    { label: "Coordination", values: ["Transactions, queues, pub/sub", "Ranked result retrieval"] },
+    { label: "Search", values: ["Key scans and collection ranges", "BM25, vector, hybrid"] },
+    { label: "Client access", values: ["Any RESP client", "Typed TypeScript, Python, Go, or raw RESP"] },
+    { label: "Persistence", values: ["Shared snapshot", "Shared snapshot"] },
   ],
 } as const;
 
 export const packages = [
   {
-    name: "@klyro/client",
+    name: "klyro-db",
     manager: "npm",
-    install: "npm install @klyro/client",
+    href: "https://www.npmjs.com/package/klyro-db",
+    install: "npm install klyro-db@0.1.1",
     lang: "ts" as const,
-    code: `import { Klyro } from "@klyro/client";
+    code: `import { createClient } from "klyro-db";
 
-const klyro = new Klyro({ url: "klyro://localhost:7171" });
+const klyro = createClient();
 
-await klyro.memory.create("user:123", { mode: "hybrid", dim: 384 });
+await klyro.memory.create("user:123", { mode: "HYBRID", dim: 384 });
 await klyro.memory.add("user:123", {
   text: "User prefers PostgreSQL for backend projects.",
   vector: embedding,
@@ -246,78 +210,79 @@ const hits = await klyro.memory.query("user:123", {
 });`,
   },
   {
-    name: "klyro",
+    name: "klyro-db",
     manager: "pip",
-    install: "pip install klyro",
+    href: "https://pypi.org/project/klyro-db/0.1.1/",
+    install: "pip install klyro-db==0.1.1",
     lang: "python" as const,
-    code: `from klyro import Klyro
+    code: `from klyro_db import Klyro, MemoryAdd, MemoryCreate, MemoryQuery
 
 klyro = Klyro(host="localhost", port=7171)
 
-klyro.memory.create("user:123", mode="hybrid", dim=384)
-klyro.memory.add(
-    "user:123",
+klyro.memory.create("user:123", MemoryCreate(mode="HYBRID", dim=384))
+klyro.memory.add("user:123", MemoryAdd(
     text="User prefers PostgreSQL for backend projects.",
     vector=embedding,
-    meta={"type": "preference"},
+    metadata={"type": "preference"},
     importance=0.85,
-)
+))
 
-hits = klyro.memory.query(
-    "user:123",
+hits = klyro.memory.query("user:123", MemoryQuery(
     text="preferred database?",
     vector=query_embedding,
     top_k=5,
-)`,
+))`,
   },
   {
-    name: "klyro-go",
-    manager: "go get",
-    install: "go get github.com/klyro/klyro-go",
+    name: "klyro/go",
+    manager: "Go",
+    href: "https://github.com/Hitesh-s0lanki/klyro/tree/main/go",
+    install: "go get github.com/Hitesh-s0lanki/klyro/go",
     lang: "go" as const,
-    code: `import "github.com/klyro/klyro-go"
+    code: `import klyro "github.com/Hitesh-s0lanki/klyro/go"
 
-client := klyro.New("localhost:7171")
+db := klyro.NewClient(nil)
 
-client.Memory.Create(ctx, "user:123", klyro.Hybrid(384))
-client.Memory.Add(ctx, "user:123", klyro.Record{
-    Text:       "User prefers PostgreSQL for backend projects.",
-    Vector:     embedding,
-    Meta:       map[string]string{"type": "preference"},
-    Importance: 0.85,
+db.Memory.Create(ctx, "user:123", klyro.CreateOptions{
+  Mode: klyro.Hybrid,
+  Dim: 384,
+})
+db.Memory.Add(ctx, "user:123", klyro.AddOptions{
+  Text: "User prefers PostgreSQL for backend projects.",
+  Vector: embedding,
 })
 
-hits, err := client.Memory.Query(ctx, "user:123", klyro.Query{
-    Text:   "preferred database?",
-    Vector: queryEmbedding,
-    TopK:   5,
+hits, err := db.Memory.Query(ctx, "user:123", klyro.QueryOptions{
+  Text: "preferred database?",
+  Vector: queryEmbedding,
+  SearchOptions: klyro.SearchOptions{TopK: 5},
 })`,
   },
 ] as const;
 
 export const faq = [
   {
-    q: "Does Klyro generate embeddings for me?",
-    a: "Not yet. You send float32 vectors from whichever model you use, and Klyro owns storage, indexing, filtering, scoring, and fusion. An optional built-in embedder is planned, at which point MEM.ADD will accept text alone.",
+    q: "Can Klyro replace Redis without application changes?",
+    a: "Klyro speaks RESP2 and RESP3, so standard Redis clients can connect directly. It implements a documented subset of 130 Redis-shaped commands. Check the command reference before migrating an existing workload.",
   },
   {
-    q: "Is it a fork of Redis?",
-    a: "No. It is an independent server written in Rust with its own storage engine, which happens to speak RESP so that existing clients work. The MEM.* family has no Redis equivalent.",
+    q: "Which data structures are included?",
+    a: "Strings, lists, hashes, sets, sorted sets, and searchable memory indexes share one keyspace. Klyro also supports transactions, pub/sub, blocking queue operations, key expiry, memory limits, and eviction policies.",
   },
   {
-    q: "How large a dataset can one index hold?",
-    a: "Vector search is an exact brute-force scan bounded by the mem-max-scan setting, which suits per-user and per-session indexes of thousands to low tens of thousands of records. An approximate index for larger corpora is on the roadmap.",
+    q: "How does Klyro persist data?",
+    a: "Klyro loads a snapshot at startup and saves on demand, during graceful shutdown, or after the configured interval when data has changed. A crash can lose writes made since the last completed snapshot.",
   },
   {
-    q: "What happens on restart?",
-    a: "The keyspace is snapshotted to a dump file on graceful shutdown, on SAVE, and automatically every 60 seconds when something changed. Memory indexes persist their configuration and records; the inverted index and vector array are rebuilt on load.",
+    q: "Which client languages have typed support?",
+    a: "TypeScript and Python packages are published as klyro-db. A Go module in the repository wraps go-redis. Other languages can send the same commands through any RESP client.",
   },
   {
-    q: "Can I use my existing Redis commands too?",
-    a: "Yes. Strings, lists, hashes, sets, and sorted sets are all there, 107 Redis-shaped commands in total, with matching reply types. Memory indexes sit in the same keyspace as everything else.",
+    q: "Does Klyro generate embeddings?",
+    a: "No. Your application sends float32 vectors from its embedding model. Klyro stores them and handles indexing, filters, similarity scoring, recency, importance, and hybrid ranking.",
   },
   {
     q: "Is it production ready?",
-    a: "It is version 0.1.0. There is no authentication, no TLS, no replication, and no clustering yet, so run it on a trusted network and read the known limitations before depending on it.",
+    a: "It is version 0.1.1. There is no authentication, no TLS, no replication, and no clustering yet, so run it on a trusted network and read the known limitations before depending on it.",
   },
 ] as const;

@@ -79,21 +79,31 @@ separator, alert, sheet.
 
 ## Theme
 
-The site is dark-only. `<html>` always carries `class="dark"`, and the
-`.dark` block in `globals.css` maps every shadcn token onto the Klyro
-palette, so `bg-card`, `text-muted-foreground`, and `bg-primary` all resolve
-to the same colors as the custom `ink`/`surface`/`brand` tokens defined in
-`@theme` above it. Change a color once there and both systems follow.
+The site is light-only. `:root` in `globals.css` maps every shadcn token
+onto the Klyro palette, so `bg-card`, `text-muted-foreground`, and
+`bg-primary` all resolve to the same colors as the custom
+`ink`/`surface`/`brand` tokens defined in `@theme` above it. Change a color
+once there and both systems follow.
 
-Two constraints that are easy to trip over:
+The palette is ordered by elevation rather than by lightness: `canvas` is
+the page ground, `surface` the card raised off it, and `surface-2` the strip
+recessed back into a card. A component picks the one that matches its depth
+and stays correct if the palette is retuned.
 
+Three constraints that are easy to trip over:
+
+- `@custom-variant dark` stays bound to an explicit `.dark` ancestor that
+  nothing sets. That is what keeps the `dark:` utilities inside the shadcn
+  primitives inert. Delete the line and Tailwind's stock variant takes over,
+  which fires off the visitor's OS preference and half-darkens the site.
 - `--font-sans` is declared in `:root`, not in `@theme`, because shadcn's
   `@theme inline` block re-declares that key and an inline theme value is
   not emitted as a variable. Declaring it in `@theme` leaves the family
   undefined at runtime and the whole site falls back to a serif.
 - `npx shadcn@latest init` rewrites `layout.tsx` to add its own font, and
-  drops whatever was on the `<html>` className. Re-check that `dark` and
-  the font variables are still there after running it.
+  drops whatever was on the `<html>` className. Re-check that the font
+  variables are still there after running it, and that it did not add
+  `dark` back.
 
 ## Adding a documentation page
 
@@ -108,11 +118,9 @@ Two constraints that are easy to trip over:
 
 ## Placeholders
 
-Real product behaviour is documented from the server itself. Two things are
-deliberately dummy until they exist, and both are labelled in the UI:
+Real product behaviour is documented from the server and published packages.
+One group of links remains deliberately dummy and is labelled in source:
 
-- **SDK packages** (`@klyro/client`, `klyro` on PyPI, `klyro-go`,
-  `klyro-client`) and the framework adapters on `/docs/sdks`.
 - **Social and site URLs** in `src/lib/site.ts` (`site.url`, `site.social`).
 
 ## Notes

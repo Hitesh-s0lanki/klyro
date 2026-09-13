@@ -2,23 +2,32 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* The site is light-only. Keeping this variant bound to an explicit `.dark`
+   ancestor -- which nothing sets -- makes the `dark:` utilities that ship
+   inside the shadcn primitives inert, instead of letting them fire off the
+   visitor's OS colour-scheme preference. */
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --color-canvas: #07080a;
-  --color-surface: #0c0e12;
-  --color-surface-2: #12151b;
-  --color-line: #1c2029;
-  --color-line-soft: #15181e;
-  --color-ink: #eceef2;
-  --color-ink-muted: #969ca8;
+  /* Light palette. `canvas` is the page ground, `surface` the raised card,
+     and `surface-2` the recessed strip inside one -- keeping the elevation
+     order the components already assume. */
+  --color-canvas: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef0f4;
+  --color-line: #dbdfe6;
+  --color-line-soft: #e7e9ef;
+  --color-ink: #101317;
+  --color-ink-muted: #545c6a;
   --color-ink-faint: #6b7280;
-  --color-brand: #8b5cf6;
-  --color-brand-bright: #a78bfa;
-  --color-brand-dim: #5b3fd6;
-  --color-cyan: #22d3ee;
-  --color-mint: #34d399;
-  --color-amber: #fbbf24;
+  /* Kylro brand: the mark moves from flame orange through signal red to
+     raspberry, anchored by the near-black wordmark. */
+  --color-brand: #f0443e;
+  --color-brand-bright: #df253b;
+  --color-brand-dim: #ff8a42;
+  --color-cyan: #b51f4c;
+  --color-mint: #0f766e;
+  --color-amber: #c2410c;
 
   --font-mono: var(--font-mono-jet), ui-monospace, "SFMono-Regular", Menlo,
     monospace;
@@ -27,41 +36,51 @@
 }
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+
+  /* shadcn/ui semantic tokens, mapped onto the Klyro palette above. The
+     site is light-only: <html> never carries `class="dark"`, so these are
+     the values every shadcn component actually resolves. */
+  --background: var(--color-canvas);
+  --foreground: var(--color-ink);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-surface);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-surface-2);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-surface-2);
+  --muted-foreground: var(--color-ink-muted);
+  --accent: var(--color-surface-2);
+  --accent-foreground: var(--color-ink);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-brand);
+  --chart-1: var(--color-brand);
+  --chart-2: var(--color-cyan);
+  --chart-3: var(--color-mint);
+  --chart-4: var(--color-amber);
+  --chart-5: var(--color-brand-dim);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: var(--color-surface);
+  --sidebar-foreground: var(--color-ink);
+  --sidebar-primary: var(--color-brand);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--color-surface-2);
+  --sidebar-accent-foreground: var(--color-ink);
+  --sidebar-border: var(--color-line);
+  --sidebar-ring: var(--color-brand);
+
+  /* Elevation. Light UI needs a shadow where the dark theme leaned on
+     contrast alone. */
+  --shadow-raised: 0 1px 2px rgba(16, 19, 23, 0.04),
+    0 8px 24px -12px rgba(16, 19, 23, 0.12);
+  --shadow-float: 0 24px 60px -30px rgba(16, 19, 23, 0.28);
 }
 
 html {
@@ -78,21 +97,27 @@ body {
 }
 
 ::selection {
-  background: color-mix(in oklab, var(--color-brand) 45%, transparent);
-  color: #fff;
+  background: color-mix(in oklab, var(--color-brand) 22%, transparent);
+  color: var(--color-ink);
+}
+
+/* Cards carried their weight through contrast in the dark theme; on a light
+   ground they need a little elevation instead. */
+[data-slot="card"] {
+  box-shadow: var(--shadow-raised);
 }
 
 /* Thin, unobtrusive scrollbars for the docs sidebar and code blocks. */
 .scroll-slim {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-line) transparent;
+  scrollbar-color: var(--color-ink-faint) transparent;
 }
 .scroll-slim::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 .scroll-slim::-webkit-scrollbar-thumb {
-  background: var(--color-line);
+  background: color-mix(in oklab, var(--color-ink-faint) 55%, transparent);
   border-radius: 999px;
 }
 
@@ -121,7 +146,7 @@ body {
     100deg,
     var(--color-ink) 0%,
     var(--color-brand-bright) 55%,
-    var(--color-cyan) 100%
+    var(--color-brand-dim) 100%
   );
   -webkit-background-clip: text;
   background-clip: text;
@@ -161,6 +186,7 @@ body {
   font-size: 15px;
   line-height: 1.75;
   color: var(--color-ink-muted);
+  overflow-wrap: break-word;
 }
 
 .doc-body > * + * {
@@ -236,7 +262,8 @@ body {
   border: 1px solid color-mix(in oklab, var(--color-brand) 20%, transparent);
   border-radius: 5px;
   padding: 0.1em 0.36em;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .doc-body hr {
@@ -309,44 +336,6 @@ body {
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* ---------------------------------------------------------------
-   shadcn/ui semantic tokens, mapped onto the Klyro palette above.
-   The site is dark-only: <html> always carries `class="dark"`, so
-   these are the values every shadcn component actually resolves.
-   --------------------------------------------------------------- */
-.dark {
-  --background: var(--color-canvas);
-  --foreground: var(--color-ink);
-  --card: var(--color-surface);
-  --card-foreground: var(--color-ink);
-  --popover: var(--color-surface);
-  --popover-foreground: var(--color-ink);
-  --primary: var(--color-brand);
-  --primary-foreground: #ffffff;
-  --secondary: var(--color-surface-2);
-  --secondary-foreground: var(--color-ink);
-  --muted: var(--color-surface-2);
-  --muted-foreground: var(--color-ink-muted);
-  --accent: var(--color-surface-2);
-  --accent-foreground: var(--color-ink);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: var(--color-line);
-  --input: var(--color-line);
-  --ring: var(--color-brand);
-  --chart-1: var(--color-brand);
-  --chart-2: var(--color-cyan);
-  --chart-3: var(--color-mint);
-  --chart-4: var(--color-amber);
-  --chart-5: var(--color-brand-bright);
-  --sidebar: var(--color-surface);
-  --sidebar-foreground: var(--color-ink);
-  --sidebar-primary: var(--color-brand);
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: var(--color-surface-2);
-  --sidebar-accent-foreground: var(--color-ink);
-  --sidebar-border: var(--color-line);
-  --sidebar-ring: var(--color-brand);
-}
 
 @layer base {
   * {

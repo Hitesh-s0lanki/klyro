@@ -10,7 +10,7 @@ import { heroTabs } from "@/content/home";
 export const metadata: Metadata = {
   title: "Introduction",
   description:
-    "Klyro is an in-memory data server with a native memory type for AI agents: text and embeddings in one index, ranked by relevance, similarity, recency, and importance.",
+    "Klyro is an in-memory database for keys, collections, queues, pub/sub, transactions, expiry, persistence, and optional ranked retrieval.",
 };
 
 export default function IntroductionPage() {
@@ -19,84 +19,75 @@ export default function IntroductionPage() {
       <DocHeader
         eyebrow="Get started"
         title="Introduction"
-        lead="Klyro is an in-memory data server that gives AI agents a memory they can rank. It stores text and embeddings in the same index, scores both against a query, and returns one fused ranking — over the Redis wire protocol, so the client you already have works."
+        lead="Klyro is an in-memory database with a familiar Redis interface. Store keys and collections, coordinate workers, publish events, run transactions, and add ranked text or vector retrieval when an application needs it."
       />
 
       <p>
-        Most agent memory is assembled out of parts: a relational table for the
-        records, a vector store for the embeddings, and a cache to keep reads
-        quick. Every write has to reach two systems, every read has to merge two
-        result sets, and the ranking logic ends up scattered through application
-        code.
+        Klyro keeps application data in one schema-free keyspace. Strings,
+        lists, hashes, sets, and sorted sets cover common state, cache, queue,
+        counter, and ranking workloads. Transactions, pub/sub, blocking list
+        operations, and key expiry provide the coordination primitives around
+        those data structures.
       </p>
       <p>
-        Klyro collapses that into one process and one data type.{" "}
-        <strong>Memory</strong> sits alongside String, List, Hash, Set, and
-        Sorted Set as a sixth native type. A key holds an index, an index holds
-        records, and a record holds text, an optional vector, flat metadata, an
-        importance score, and its own expiry.
+        The server speaks RESP, so existing Redis clients can connect directly.
+        It can write snapshots to disk, enforce a memory limit with configurable
+        eviction, and store optional <strong>Memory</strong> indexes beside the
+        core data types for keyword, vector, or hybrid retrieval.
       </p>
 
       <CardGrid>
         <LinkCard href="/docs/quickstart" title="Quickstart">
-          Run the server and go from an empty keyspace to a ranked hybrid query
-          in about a minute.
+          Run the server, connect a client, and work with keys and collections.
         </LinkCard>
-        <LinkCard href="/docs/memory-indexes" title="Memory indexes">
-          The three retrieval modes, what each one stores, and which queries
-          each can serve.
+        <LinkCard href="/docs/data-types" title="Data type commands">
+          Strings, lists, hashes, sets, and sorted sets with Redis-shaped replies.
         </LinkCard>
-        <LinkCard href="/docs/api-reference" title="MEM.* reference">
-          All fifteen memory commands, their arguments, and their reply shapes.
+        <LinkCard href="/docs/clients" title="Client libraries">
+          Connect with redis-py, ioredis, go-redis, redis-cli, or a typed package.
         </LinkCard>
-        <LinkCard href="/docs/sdks" title="SDKs & packages">
-          Package names, install commands, and import snippets for the typed
-          clients.
+        <LinkCard href="/docs/memory-indexes" title="Ranked retrieval">
+          Add text, vector, or hybrid indexes when the workload calls for them.
         </LinkCard>
       </CardGrid>
 
       <h2 id="what-you-get">What you get</h2>
       <ul>
         <li>
-          <strong>Hybrid retrieval in one call.</strong> BM25 keyword scoring and
-          vector similarity run against the same records, then fuse into a single
-          ranking.
+          <strong>Useful data structures.</strong> Model values, counters,
+          collections, queues, unique membership, and ranked sets without a schema.
         </li>
         <li>
-          <strong>Four ranking signals.</strong> Keyword relevance, semantic
-          similarity, recency, and importance, each with a weight you set per
-          index or per query.
+          <strong>Atomic operations.</strong> Group commands in transactions and
+          use optimistic locking when an update depends on the current value.
         </li>
         <li>
-          <strong>Filters before scoring.</strong> Metadata and record fields
-          narrow the candidate set first, which keeps a query off the whole
-          namespace.
+          <strong>Application coordination.</strong> Publish events, subscribe to
+          channels, and block workers until queue items arrive.
         </li>
         <li>
-          <strong>No new client.</strong> Klyro speaks RESP2 and RESP3, so
-          redis-py, ioredis, go-redis, and <code>redis-cli</code> all connect
-          with no adapter.
+          <strong>Controlled memory use.</strong> Expire keys and records, set a
+          memory ceiling, and choose how Klyro evicts data when it reaches the limit.
         </li>
         <li>
-          <strong>The rest of the keyspace.</strong> 107 Redis-shaped commands
-          across five classic types, in the same process, with matching reply
-          types.
+          <strong>Restorable snapshots.</strong> Save the keyspace to disk and
+          load it when the server starts again.
         </li>
       </ul>
 
       <h2 id="the-shape-of-it">The shape of it</h2>
       <p>
-        Three commands cover the whole lifecycle. Create an index, add records,
-        query them.
+        Use a published package or any RESP client. The same keyspace and command
+        behavior are available from each language.
       </p>
 
       <CodeTabs tabs={[...heroTabs]} className="my-6" />
 
-      <h2 id="three-modes">Three retrieval modes</h2>
+      <h2 id="three-modes">Optional ranked retrieval</h2>
       <p>
-        A single implementation exposes three logical structures. The mode is
-        fixed when the index is created, and a mode that cannot serve a query
-        returns an error rather than quietly returning a worse answer.
+        Memory indexes add three retrieval modes to the same database. The mode
+        is fixed when an index is created, and a mode that cannot serve a query
+        returns an error.
       </p>
 
       <RefTable
@@ -110,11 +101,10 @@ export default function IntroductionPage() {
 
       <Callout variant="note" title="Bring your own embeddings">
         <p>
-          Klyro does not embed text for you. Your application sends the float32
-          vector it got from whichever model it uses, and Klyro owns storage,
-          indexing, filtering, scoring, and fusion. An optional built-in encoder
-          is on the roadmap; until then the model can change without the index
-          changing with it.
+          Klyro stores and searches vectors but does not generate them. Send the
+          float32 output from your embedding model; Klyro handles indexing,
+          filtering, scoring, and fusion. Because the model runs outside the
+          server, you can choose it independently for each index.
         </p>
       </Callout>
 
@@ -146,13 +136,12 @@ defaults: 0.35  0.50  0.10  0.05     half-life: 7 days`}
         per query with <code>WEIGHTS</code>.
       </p>
 
-      <h2 id="where-it-fits">Where it fits</h2>
+      <h2 id="where-it-fits">Where ranked retrieval fits</h2>
       <p>
-        Klyro suits per-user and per-session memory: thousands to low tens of
-        thousands of records per index, read constantly, written continuously,
-        and needed in single-digit milliseconds. Vector search is an exact
-        brute-force scan bounded by <code>mem-max-scan</code>, so it is
-        deliberately not a billion-vector store. See{" "}
+        Memory indexes suit thousands to low tens of thousands of records per
+        index. Vector search uses an exact scan bounded by{" "}
+        <code>mem-max-scan</code>; larger vector collections need an approximate
+        index, which is planned. See{" "}
         <a href="/docs/limitations">limitations</a> for the full picture before
         you depend on it.
       </p>
@@ -160,7 +149,7 @@ defaults: 0.35  0.50  0.10  0.05     half-life: 7 days`}
       <h2 id="next-steps">Next steps</h2>
       <CardGrid columns={3}>
         <LinkCard href="/docs/quickstart" title="Quickstart">
-          Server up, index created, first query returned.
+          Start the server and work with your first keys.
         </LinkCard>
         <LinkCard href="/docs/retrieval-and-ranking" title="Retrieval & ranking">
           Weights, fusion strategies, and reading a score breakdown.

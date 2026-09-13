@@ -16,8 +16,17 @@ export default function ClientsPage() {
       <DocHeader
         eyebrow="Integrations"
         title="Client libraries"
-        lead="Klyro speaks RESP, the Redis wire protocol, so any Redis client library works. There is nothing Klyro-specific to install."
+        lead="Use the typed Klyro clients for TypeScript, Python, and Go, or connect through any Redis client. Both paths use the same RESP wire protocol."
       />
+
+      <Callout variant="tip" title="Typed clients are available">
+        <p>
+          Install a TypeScript, Python, or Go client for typed methods covering
+          all 15 <code>MEM.*</code> commands. The raw Redis clients below remain
+          useful for other languages and direct protocol access. See{" "}
+          <a href="/docs/sdks">SDKs and packages</a>.
+        </p>
+      </Callout>
 
       <h2 id="verified">Verified clients</h2>
       <p>These were run against Klyro over its real socket, and all of them pass:</p>
@@ -53,9 +62,9 @@ if r.set("lock:job", "token", nx=True, ex=30):
           {
             label: "Go",
             lang: "go",
-            code: `import "github.com/redis/go-redis/v9"
+            code: `import klyro "github.com/Hitesh-s0lanki/klyro/go"
 
-r := redis.NewClient(&redis.Options{Addr: "localhost:7171"})
+r := klyro.NewClient(nil)
 r.Set(ctx, "greeting", "hello", 0)
 value, err := r.Get(ctx, "greeting").Result()`,
           },
@@ -72,17 +81,19 @@ console.log(await r.get("greeting"));`,
         className="my-6"
       />
 
-      <h2 id="raw-commands">Sending MEM.* commands</h2>
+      <h2 id="raw-commands">Sending raw MEM.* commands</h2>
       <p>
-        The memory family has no dedicated method in any Redis client, so use the
-        raw-command call each one provides. This is the one thing worth
-        memorising per language:
+        Generic Redis clients do not know Klyro&apos;s memory family. Use the
+        raw-command call each client provides, or use a typed Klyro wrapper:
       </p>
       <RefTable
         head={["Client", "Raw command call"]}
         rows={[
           ["redis-py", "r.execute_command(\"MEM.QUERY\", key, ...)"],
           ["ioredis", "r.call(\"MEM.QUERY\", key, ...)"],
+          ["klyro-db (Python)", "r.memory.query(key, MemoryQuery(...))"],
+          ["klyro-db (TypeScript)", "r.memory.query(key, { ... })"],
+          ["klyro/go", "r.Memory.Query(ctx, key, klyro.QueryOptions{ ... })"],
           ["go-redis", "r.Do(ctx, \"MEM.QUERY\", key, ...)"],
           ["redis-rs", "redis::cmd(\"MEM.QUERY\").arg(key).query(&mut con)"],
         ]}
@@ -188,8 +199,8 @@ LPUSH mylist a
           Every client exposes far more of the Redis API than Klyro implements.
           Calling something unimplemented returns{" "}
           <code>ERR unknown command</code>, which surfaces as an exception. The
-          notable absences are transactions, pub/sub, scripting, the blocking
-          commands, and the Stream, Bitmap, HyperLogLog, and Geo types. Klyro
+          notable absences are scripting and the Stream, Bitmap, HyperLogLog,
+          and Geo types. Klyro
           also has no authentication, so leave the <code>password</code> option
           unset.
         </p>

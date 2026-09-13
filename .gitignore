@@ -14,3 +14,7 @@ learning
 
 # Local secrets, e.g. the npm token
 .env*
+
+# Local OS and Python cache files
+.DS_Store
+__pycache__/

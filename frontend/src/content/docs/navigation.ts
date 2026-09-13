@@ -22,17 +22,17 @@ export const docsNav: DocGroup[] = [
   {
     title: "Core concepts",
     links: [
+      { title: "Data types", href: "/docs/data-types" },
+      { title: "Persistence", href: "/docs/persistence" },
       { title: "Memory indexes", href: "/docs/memory-indexes" },
       { title: "Retrieval & ranking", href: "/docs/retrieval-and-ranking" },
       { title: "Filters & metadata", href: "/docs/filters" },
-      { title: "Persistence", href: "/docs/persistence" },
     ],
   },
   {
     title: "Reference",
     links: [
       { title: "MEM.* commands", href: "/docs/api-reference", tag: "15" },
-      { title: "Data type commands", href: "/docs/data-types", tag: "107" },
       { title: "Configuration", href: "/docs/configuration" },
     ],
   },
@@ -40,7 +40,7 @@ export const docsNav: DocGroup[] = [
     title: "Integrations",
     links: [
       { title: "Client libraries", href: "/docs/clients" },
-      { title: "SDKs & packages", href: "/docs/sdks", tag: "beta" },
+      { title: "SDKs & packages", href: "/docs/sdks", tag: "new" },
     ],
   },
   {

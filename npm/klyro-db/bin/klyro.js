@@ -2,7 +2,7 @@
 // The `klyro` command. Finds the binary npm installed for this machine
 // and hands the process over to it.
 //
-// This file is the only thing in the wrapper package. The binaries live
+// The binaries live
 // in the per-platform packages listed under optionalDependencies, one
 // of which npm will have installed - that is the whole mechanism.
 

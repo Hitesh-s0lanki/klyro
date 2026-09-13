@@ -7,15 +7,15 @@ export function HowItWorks() {
     <Section id="how-it-works">
       <SectionHeading
         eyebrow="How it works"
-        title="Three commands from empty to ranked recall"
-        description="No schema to declare, no collection to provision, no second store to keep in step. A key becomes a memory index the moment you create it."
+        title="Start a server and write data immediately"
+        description="Klyro listens on port 7171 and accepts RESP commands from redis-cli or an existing Redis client. No schema or migration is required."
       />
 
       <div className="mt-14 space-y-4">
         {steps.map((step) => (
           <div
             key={step.number}
-            className="grid gap-6 rounded-card border border-line bg-surface/40 p-6 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] md:items-center md:gap-10 md:p-8"
+            className="grid gap-6 rounded-card border border-line bg-surface p-6 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] md:items-center md:gap-10 md:p-8"
           >
             <div>
               <span className="font-mono text-[11px] tracking-[0.2em] text-brand-bright">

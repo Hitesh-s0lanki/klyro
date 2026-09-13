@@ -30,17 +30,17 @@ export function Features() {
     <Section id="features">
       <SectionHeading
         eyebrow="Features"
-        title="Everything an agent needs to recall, in one data type"
-        description="A memory index is a native Klyro type, so it lives in the same keyspace as your strings and hashes, expires like them, and persists with them. What it adds is retrieval built for how agents actually remember."
+        title="The building blocks for fast application state"
+        description="Use familiar data structures, transactions, queues, pub/sub, expiry, and snapshots through one RESP endpoint."
       />
 
-      <div className="mt-14 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-14 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {features.map((feature) => {
           const Icon = ICONS[feature.icon as keyof typeof ICONS];
           return (
             <Card
               key={feature.title}
-              className="group/feature h-full rounded-card bg-surface/40 py-7 transition hover:bg-surface/70 hover:ring-brand/30"
+              className="group/feature h-full rounded-card bg-surface py-7 transition hover:bg-surface-2/50 hover:ring-brand/30"
             >
               <CardHeader className="gap-0">
                 <span className="grid size-9 place-items-center rounded-lg bg-surface-2 text-brand-bright ring-1 ring-line transition group-hover/feature:ring-brand/40">

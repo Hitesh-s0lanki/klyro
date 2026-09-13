@@ -33,7 +33,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Filter pages"
           aria-label="Filter documentation"
-          className="h-9 bg-surface/60 pl-9 text-[13px]"
+          className="h-9 bg-surface pl-9 text-[13px]"
         />
       </div>
 
@@ -56,7 +56,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                         "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13.5px] transition",
                         active
                           ? "bg-brand/12 font-medium text-brand-bright"
-                          : "text-ink-muted hover:bg-surface hover:text-ink",
+                          : "text-ink-muted hover:bg-surface-2 hover:text-ink",
                       )}
                     >
                       {link.title}

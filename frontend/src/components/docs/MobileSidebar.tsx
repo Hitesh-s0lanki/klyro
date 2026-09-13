@@ -16,7 +16,7 @@ export function MobileSidebar() {
       >
         <MenuIcon /> Documentation menu
       </SheetTrigger>
-      <SheetContent side="right" className="w-[19rem] max-w-[85vw] bg-canvas">
+      <SheetContent side="right" className="w-[19rem] max-w-[85vw] bg-surface">
         <SheetHeader className="pb-0">
           <SheetTitle>Documentation</SheetTitle>
         </SheetHeader>

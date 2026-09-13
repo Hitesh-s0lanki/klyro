@@ -14,33 +14,33 @@ const INSTALL = `docker run -d -p 7171:7171 ${site.docker}`;
 export function Hero() {
   return (
     <section className="relative overflow-hidden">
-      <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid bg-radial-fade opacity-70" />
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid bg-radial-fade opacity-60" />
       <div
         aria-hidden
-        className="pointer-events-none absolute left-1/2 top-[-18rem] h-[36rem] w-[70rem] -translate-x-1/2 rounded-full bg-brand/12 blur-[140px]"
+        className="pointer-events-none absolute left-1/2 top-[-18rem] h-[36rem] w-[70rem] -translate-x-1/2 rounded-full bg-brand/8 blur-[140px]"
       />
 
       <div className="relative mx-auto w-full max-w-6xl px-5 pb-20 pt-16 sm:px-8 sm:pb-28 sm:pt-24">
-        <div className="mx-auto max-w-3xl text-center">
+        <div className="mx-auto max-w-5xl text-center">
           <Badge
             variant="outline"
-            className="animate-rise h-auto gap-2 bg-surface-2/60 px-3 py-1 text-[11.5px] font-medium tracking-wide text-ink-muted"
+            className="animate-rise h-auto max-w-full justify-center gap-2 whitespace-normal bg-surface-2/60 px-3 py-1 text-center text-[11.5px] leading-relaxed font-medium tracking-wide text-ink-muted"
           >
             <SparklesIcon className="text-brand-bright" />
-            v0.1.0 — memory indexes are live
+            v0.1.1 — typed clients for TypeScript, Python, and Go
           </Badge>
 
-          <h1 className="animate-rise mt-6 text-4xl font-semibold leading-[1.08] tracking-tight sm:text-6xl">
-            The memory layer
-            <br className="hidden sm:block" />{" "}
-            <span className="text-gradient">your agents remember with</span>
+          <h1 className="animate-rise mx-auto mt-6 text-balance text-4xl font-semibold leading-[1.08] tracking-tight sm:text-5xl lg:text-6xl">
+            <span className="block lg:whitespace-nowrap">A practical in-memory database</span>
+            <span className="mt-1 block text-gradient lg:whitespace-nowrap">
+              with a familiar Redis interface
+            </span>
           </h1>
 
-          <p className="animate-rise mx-auto mt-6 max-w-2xl text-[15.5px] leading-relaxed text-ink-muted sm:text-[17px]">
-            Klyro stores text and embeddings in one index and ranks them by keyword
-            relevance, semantic similarity, recency, and importance in a single
-            query. It speaks the Redis wire protocol, so the client you already
-            have works unchanged.
+          <p className="animate-rise mx-auto mt-6 max-w-2xl text-pretty text-[15.5px] leading-relaxed text-ink-muted sm:text-[17px]">
+            Keep application state, collections, queues, and live events in RAM.
+            Connect with an existing Redis client, persist snapshots to disk, and
+            add text or vector indexes only where you need ranked retrieval.
           </p>
 
           <div className="animate-rise mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
@@ -57,7 +57,7 @@ export function Hero() {
             </Button>
           </div>
 
-          <Card className="animate-rise mx-auto mt-7 w-full max-w-xl flex-row items-center gap-3 rounded-xl bg-surface/80 px-4 py-2.5 backdrop-blur">
+          <Card className="animate-rise mx-auto mt-7 w-full max-w-xl flex-row items-center gap-3 rounded-xl bg-surface px-4 py-2.5 backdrop-blur">
             <span className="font-mono text-[11px] text-brand-bright">$</span>
             <code className="scroll-slim flex-1 overflow-x-auto whitespace-nowrap text-left font-mono text-[12.5px] text-ink-muted">
               {INSTALL}
@@ -73,7 +73,7 @@ export function Hero() {
           />
           <CodeTabs
             tabs={[...heroTabs]}
-            className="relative shadow-[0_40px_90px_-40px_rgba(0,0,0,0.9)]"
+            className="relative shadow-[var(--shadow-float)]"
           />
         </div>
 

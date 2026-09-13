@@ -5,7 +5,7 @@ import { RefTable } from "@/components/docs/Table";
 
 export const metadata: Metadata = {
   title: "Limitations",
-  description: "What Klyro 0.1.0 does not do yet, and what that means for how you deploy it.",
+  description: "What Klyro 0.1.1 does not do yet, and what that means for how you deploy it.",
 };
 
 export default function LimitationsPage() {
@@ -14,7 +14,7 @@ export default function LimitationsPage() {
       <DocHeader
         eyebrow="About"
         title="Limitations"
-        lead="Klyro is version 0.1.0. These are the things worth knowing before you depend on it, stated plainly rather than buried."
+        lead="Klyro is version 0.1.1. Review these operational and compatibility limits before using it for important workloads."
       />
 
       <Callout variant="danger" title="No authentication, ACLs, or TLS">
@@ -27,24 +27,23 @@ export default function LimitationsPage() {
 
       <h2 id="missing-commands">Missing commands</h2>
       <p>
-        Only the 122 documented commands exist. A client library will happily
-        call anything else and get back <code>ERR unknown command</code>. The
-        notable absences:
+        Klyro implements the 145 commands in this documentation. Calls to other
+        commands return <code>ERR unknown command</code>. Notable absences include:
       </p>
       <RefTable
         head={["Area", "Status"]}
         rows={[
-          ["Transactions (MULTI/EXEC)", "Not implemented"],
-          ["Pub/sub (SUBSCRIBE/PUBLISH)", "Not implemented"],
           ["Scripting (EVAL)", "Not implemented"],
-          ["Blocking commands (BLPOP)", "Not implemented"],
           ["Streams, Bitmaps, HyperLogLog, Geo", "Not implemented"],
           ["ZUNIONSTORE/ZINTERSTORE, lexicographic ranges, ZADD flags", "Not implemented"],
+          ["Sharded pub/sub and keyspace notifications", "Not implemented"],
         ]}
       />
       <p>
-        Practically, that means no queues and no server-side atomic
-        read-modify-write beyond what a single command already does.
+        Transactions, standard pub/sub, and blocking queue commands are
+        implemented. Client libraries still expose many Redis commands that
+        Klyro does not support, so use the documented command reference as the
+        compatibility boundary.
       </p>
 
       <h2 id="retrieval">Retrieval</h2>
@@ -60,9 +59,9 @@ export default function LimitationsPage() {
           An approximate index is planned.
         </li>
         <li>
-          <strong>Metadata is flat strings.</strong> Not JSON, and not nested.
-          Values that parse as numbers compare numerically; everything else
-          compares as bytes.
+          <strong>Metadata uses flat string fields.</strong> Values that parse as
+          numbers compare numerically; other values compare as bytes. Nested
+          objects and JSON operators are unavailable.
         </li>
       </ul>
 
@@ -86,23 +85,24 @@ export default function LimitationsPage() {
         </li>
         <li>
           <strong>SCAN costs O(n log n) per call.</strong> The cursor is a
-          position in a sorted snapshot of the keyspace, rather than the O(1) a
-          real <code>SCAN</code> gives.
+          position in a sorted snapshot of the keyspace. Redis uses a different
+          cursor implementation with O(1) work per call.
         </li>
         <li>
-          <strong>RESP3 push messages are unimplemented</strong>, because there
-          is no pub/sub or client-side caching to push.
+          <strong>Client-side caching is unimplemented.</strong> RESP3 push
+          messages are used for pub/sub, but tracking and invalidation messages
+          are not available.
         </li>
       </ul>
 
       <h2 id="what-it-is-good-at">What it is good at</h2>
       <p>
-        Per-user and per-session agent memory: thousands to low tens of
-        thousands of records per index, read constantly, written continuously,
-        needed in single-digit milliseconds, on a trusted network, where losing
-        the last minute of writes to a hard crash is survivable. Inside that
-        envelope the tradeoffs above are the reason it is fast and simple to
-        operate. Outside it, reach for something else, and see the{" "}
+        Klyro fits single-node workloads that keep frequently accessed state,
+        queues, counters, collections, and moderate search indexes close to the
+        application. Run it on a trusted network and use it where snapshot-based
+        durability meets the workload&apos;s recovery needs. Large vector collections,
+        public endpoints, and workloads requiring replication need a different
+        deployment today. See the{" "}
         <a href="/docs/roadmap">roadmap</a> for what is coming.
       </p>
     </>

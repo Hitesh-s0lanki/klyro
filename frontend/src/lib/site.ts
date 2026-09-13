@@ -5,9 +5,9 @@
  */
 export const site = {
   name: "Klyro",
-  tagline: "The memory layer for AI agents",
+  tagline: "A fast in-memory database with a familiar Redis interface",
   description:
-    "Klyro is an in-memory data server that stores text and embeddings in one index and ranks them by keyword relevance, semantic similarity, recency, and importance in a single query. It speaks the Redis wire protocol, so the client you already have works.",
+    "Klyro is an in-memory database for strings, lists, hashes, sets, sorted sets, queues, pub/sub, transactions, and ranked text and vector search. It speaks RESP, so existing Redis clients can connect directly.",
   url: "https://klyro.dev", // placeholder
   repo: "https://github.com/Hitesh-s0lanki/klyro",
   docker: "ghcr.io/hitesh-s0lanki/klyro:latest",
@@ -15,7 +15,8 @@ export const site = {
   social: {
     x: "https://x.com/klyrodb", // placeholder
     discord: "https://discord.gg/klyro", // placeholder
-    npm: "https://www.npmjs.com/package/@klyro/client", // placeholder
+    npm: "https://www.npmjs.com/package/klyro-db",
+    pypi: "https://pypi.org/project/klyro-db/",
   },
 } as const;
 
@@ -44,8 +45,8 @@ export const footerNav = [
       { label: "Introduction", href: "/docs" },
       { label: "Quickstart", href: "/docs/quickstart" },
       { label: "Installation", href: "/docs/installation" },
+      { label: "Data types", href: "/docs/data-types" },
       { label: "Memory indexes", href: "/docs/memory-indexes" },
-      { label: "MEM.* reference", href: "/docs/api-reference" },
     ],
   },
   {
@@ -55,6 +56,8 @@ export const footerNav = [
       { label: "Configuration", href: "/docs/configuration" },
       { label: "Clients", href: "/docs/clients" },
       { label: "Roadmap", href: "/docs/roadmap" },
+      { label: "npm", href: "https://www.npmjs.com/package/klyro-db" },
+      { label: "PyPI", href: "https://pypi.org/project/klyro-db/" },
       { label: "GitHub", href: "https://github.com/Hitesh-s0lanki/klyro" },
     ],
   },
@@ -62,8 +65,8 @@ export const footerNav = [
 
 /** Headline numbers, all taken from the current build of the server. */
 export const stats = [
-  { value: "122", label: "commands", detail: "107 Redis-shaped, 15 MEM.*" },
-  { value: "382", label: "tests", detail: "unit plus real-socket integration" },
+  { value: "145", label: "commands", detail: "130 Redis-shaped, 15 MEM.*" },
+  { value: "6", label: "data types", detail: "five classic, one searchable" },
   { value: "~15 MB", label: "container image", detail: "static musl on Alpine" },
   { value: "1", label: "dependency", detail: "libc, for poll()" },
 ] as const;

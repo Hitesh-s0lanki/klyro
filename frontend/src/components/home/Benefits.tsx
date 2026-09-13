@@ -8,13 +8,13 @@ export function Benefits() {
     <Section id="why-klyro">
       <SectionHeading
         eyebrow="Why Klyro"
-        title="What you get back for adopting it"
-        description="Agent memory usually arrives as a stack of services glued together with dual writes. Collapsing it into one in-memory server changes the operational maths, the latency budget, and how debuggable recall is."
+        title="One server for state, coordination, and search"
+        description="Keep frequently accessed data and the operations around it behind one port and one client protocol."
       />
 
       <div className="mt-14 grid gap-4 md:grid-cols-2">
         {benefits.map((benefit) => (
-          <Card key={benefit.title} className="relative rounded-card bg-surface/40 py-7">
+          <Card key={benefit.title} className="relative rounded-card bg-surface py-7">
             <div
               aria-hidden
               className="pointer-events-none absolute right-[-4rem] top-[-4rem] size-40 rounded-full bg-brand/8 blur-3xl"

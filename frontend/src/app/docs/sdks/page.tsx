@@ -3,7 +3,6 @@ import { DocHeader } from "@/components/docs/DocHeader";
 import { Callout } from "@/components/docs/Callout";
 import { RefTable } from "@/components/docs/Table";
 import { CodeBlock } from "@/components/ui/CodeBlock";
-import { CodeTabs } from "@/components/ui/CodeTabs";
 import { packages } from "@/content/home";
 
 export const metadata: Metadata = {
@@ -17,33 +16,24 @@ export default function SdksPage() {
       <DocHeader
         eyebrow="Integrations"
         title="SDKs & packages"
-        lead="The wire protocol needs no SDK. These optional clients wrap the MEM.* family in a typed surface, so vectors, metadata, and filters stop being positional strings."
+        lead="The TypeScript, Python, and Go clients wrap every MEM.* command in a typed surface, while raw RESP remains available in any language."
       />
-
-      <Callout variant="warning" title="Placeholder coordinates">
-        <p>
-          The package names, versions, and import paths on this page are
-          reserved but <strong>not yet published</strong>. They are here so
-          application code can be sketched against the intended shape. Replace
-          them with the real coordinates once the SDKs ship; nothing else in the
-          documentation depends on them.
-        </p>
-      </Callout>
 
       <h2 id="packages">Packages</h2>
       <RefTable
         head={["Package", "Registry", "Install", "Status"]}
         rows={[
-          ["@klyro/client", "npm", "npm install @klyro/client", "Planned"],
-          ["klyro", "PyPI", "pip install klyro", "Planned"],
-          ["github.com/klyro/klyro-go", "Go modules", "go get github.com/klyro/klyro-go", "Planned"],
-          ["klyro-client", "crates.io", "cargo add klyro-client", "Planned"],
+          ["klyro-db 0.1.1", "npm", "npm install klyro-db", "Published"],
+          ["klyro-db 0.1.1", "PyPI", "pip install klyro-db", "Published"],
+          ["klyro/go", "Go source module", "go get github.com/Hitesh-s0lanki/klyro/go", "Typed client"],
+          ["redis-rs", "crates.io", "cargo add redis", "Raw RESP client"],
         ]}
       />
       <p>
-        Until they land, use any Redis client with its raw-command call. See{" "}
-        <a href="/docs/clients">client libraries</a>, which is the supported
-        path today.
+        npm provides the typed TypeScript client and native server launcher.
+        PyPI provides the typed Python client. The repository&apos;s Go module wraps
+        go-redis with typed memory methods. Other languages use raw commands; see{" "}
+        <a href="/docs/clients">client libraries</a>.
       </p>
 
       <h2 id="typescript">TypeScript</h2>
@@ -54,76 +44,70 @@ export default function SdksPage() {
       <RefTable
         head={["Option", "Type", "Default", "Meaning"]}
         rows={[
-          ["url", "string", "klyro://localhost:7171", "Connection string; host and port are read from it"],
-          ["socketTimeout", "number", "5000", "Milliseconds before a command is abandoned"],
-          ["maxRetries", "number", "3", "Reconnect attempts before an error is surfaced"],
-          ["defaultTopK", "number", "10", "TOPK used when a query does not name one"],
-          ["encoding", '"utf8" | "buffer"', '"utf8"', "How record text is decoded on the way back"],
+          ["host", "string", "127.0.0.1", "Klyro server host"],
+          ["port", "number", "7171", "Klyro server port"],
+          ["lazyConnect", "boolean", "false", "Wait for client.connect() before opening the socket"],
+          ["connectTimeout", "number", "10000", "ioredis connection timeout in milliseconds"],
+          ["retryStrategy", "function", "ioredis default", "Controls reconnect timing"],
         ]}
       />
+      <p>
+        <code>createClient()</code> returns an ioredis client, so ordinary Redis
+        methods retain their upstream types. Klyro&apos;s 15 memory commands live
+        under <code>client.memory</code>. Use <code>client.memoryBuffer</code> when
+        IDs, text, or metadata contain arbitrary bytes.
+      </p>
 
       <h2 id="python">Python</h2>
       <CodeBlock lang="bash" filename="terminal" code={packages[1].install} />
       <CodeBlock lang="python" filename="memory.py" code={packages[1].code} />
+      <p>
+        <code>Klyro</code> subclasses redis-py&apos;s <code>Redis</code>, so standard
+        commands remain available on the same object. Its <code>memory</code>
+        property provides typed dataclasses and decoded replies for every
+        current <code>MEM.*</code> command. The distribution includes a{" "}
+        <code>py.typed</code> marker for mypy, Pyright, and compatible editors.
+      </p>
 
       <h2 id="go">Go</h2>
       <CodeBlock lang="bash" filename="terminal" code={packages[2].install} />
       <CodeBlock lang="go" filename="memory.go" code={packages[2].code} />
-
-      <h2 id="framework-adapters">Framework adapters</h2>
       <p>
-        Thin adapters that expose a Klyro index as the memory or retriever
-        interface an agent framework already expects. All placeholders, same as
-        above.
+        <code>NewClient</code> embeds the go-redis universal client, so its standard
+        commands remain available. Typed memory methods live under{" "}
+        <code>client.Memory</code>. Use <code>klyro.Wrap</code> to add them to an
+        existing go-redis client.
       </p>
-      <CodeTabs
-        tabs={[
-          {
-            label: "LangChain",
-            lang: "python",
-            code: `# pip install klyro-langchain
-from klyro_langchain import KlyroMemoryStore
-from langchain_openai import OpenAIEmbeddings
 
-store = KlyroMemoryStore(
-    namespace="user:123",
-    embeddings=OpenAIEmbeddings(),
-    url="klyro://localhost:7171",
-)
-
-retriever = store.as_retriever(search_kwargs={"top_k": 5})`,
-          },
-          {
-            label: "LlamaIndex",
-            lang: "python",
-            code: `# pip install klyro-llama-index
-from klyro_llama_index import KlyroVectorStore
-from llama_index.core import VectorStoreIndex, StorageContext
-
-vector_store = KlyroVectorStore(namespace="user:123", dim=1536)
-storage = StorageContext.from_defaults(vector_store=vector_store)
-index = VectorStoreIndex.from_documents(documents, storage_context=storage)`,
-          },
-          {
-            label: "Vercel AI SDK",
-            lang: "ts",
-            code: `// npm install @klyro/ai-sdk
-import { klyroMemory } from "@klyro/ai-sdk";
-import { streamText } from "ai";
-
-const memory = klyroMemory({ namespace: "user:123", dim: 1536 });
-
-const recalled = await memory.recall(prompt, { topK: 5 });
-
-const result = streamText({
-  model: myModel,
-  system: \`Known about this user:\\n\${recalled.map((m) => m.text).join("\\n")}\`,
-  prompt,
-});`,
-          },
+      <h2 id="memory-methods">Typed memory methods</h2>
+      <RefTable
+        head={["TypeScript", "Python", "Go", "Command"]}
+        rows={[
+          ["memory.create", "memory.create", "Memory.Create", "MEM.CREATE"],
+          ["memory.info", "memory.info", "Memory.Info", "MEM.INFO"],
+          ["memory.config", "memory.config", "Memory.Config", "MEM.CONFIG"],
+          ["memory.card", "memory.card", "Memory.Card", "MEM.CARD"],
+          ["memory.add", "memory.add", "Memory.Add", "MEM.ADD"],
+          ["memory.get / mget", "memory.get / mget", "Memory.Get / MGet", "MEM.GET / MEM.MGET"],
+          ["memory.del", "memory.delete", "Memory.Delete", "MEM.DEL"],
+          ["memory.setMeta", "memory.set_metadata", "Memory.SetMetadata", "MEM.SETMETA"],
+          ["memory.delMeta", "memory.delete_metadata", "Memory.DeleteMetadata", "MEM.DELMETA"],
+          ["memory.expire", "memory.expire", "Memory.Expire", "MEM.EXPIRE"],
+          ["memory.scan", "memory.scan", "Memory.Scan", "MEM.SCAN"],
+          ["memory.search", "memory.search", "Memory.Search", "MEM.SEARCH"],
+          ["memory.vsearch", "memory.vector_search", "Memory.VectorSearch", "MEM.VSEARCH"],
+          ["memory.query", "memory.query", "Memory.Query", "MEM.QUERY"],
         ]}
-        className="my-6"
       />
+
+      <Callout variant="note" title="The server runs separately">
+        <p>
+          Creating a client opens a connection; it does not start Klyro.
+          Run the server with <code>npx klyro-db</code>, Docker, or the native
+          binary first. The npm package also includes the server launcher; the
+          PyPI wheel and Go module are client libraries.
+        </p>
+      </Callout>
 
       <h2 id="what-an-sdk-adds">What an SDK adds over raw commands</h2>
       <ul>
@@ -146,7 +130,7 @@ const result = streamText({
         </li>
       </ul>
 
-      <Callout variant="note" title="Nothing is gated behind them">
+      <Callout variant="note" title="Raw RESP remains available">
         <p>
           The SDKs are ergonomics. Every capability is reachable over RESP with
           the client you already have, and will stay that way.

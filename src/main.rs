@@ -24,8 +24,8 @@ use config::Config;
 static ALLOCATOR: util::memory::CountingAllocator = util::memory::CountingAllocator;
 
 const KLYRO_NAME: &str = "Klyro";
-const KLYRO_TAGLINE: &str = "The high-performance in-memory data server";
-pub const KLYRO_VERSION: &str = "0.1.0";
+const KLYRO_TAGLINE: &str = "A practical in-memory database with a familiar Redis interface";
+pub const KLYRO_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Reported as `redis_version` by INFO. Client libraries gate command
 /// availability on it, so it names the Redis release whose command
 /// shapes Klyro implements - not a claim to be that server.

@@ -35,8 +35,8 @@ export function CodeBlock({
   return (
     <Card className={cn("gap-0 rounded-card py-0", className)}>
       {(filename || copyable) && (
-        <CardHeader className="flex grid-cols-none flex-row items-center justify-between gap-3 border-b border-line-soft bg-surface-2/60 px-4 py-2">
-          <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-ink-faint">
+        <CardHeader className="flex min-w-0 grid-cols-none flex-row items-center justify-between gap-3 border-b border-line-soft bg-surface-2/60 px-4 py-2">
+          <span className="min-w-0 truncate font-mono text-[11px] uppercase tracking-[0.14em] text-ink-faint">
             {filename ?? lang}
           </span>
           {copyable && <CopyButton value={code.trimEnd()} />}
