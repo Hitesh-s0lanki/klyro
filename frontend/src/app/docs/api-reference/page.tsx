@@ -119,7 +119,7 @@ pref:db`}
 1) "id"          2) "1"
 3) "text"        4) "Prefers PostgreSQL."
 5) "importance"  6) "0.85"
-7) "created_at"  8) (integer) 1757462400
+7) "created_at"  8) (integer) 1757462400000
 9) "meta"       10) 1) "type" 2) "preference"
 
 MEM.SCAN user:123 0 COUNT 100 FILTER type EQ preference
@@ -148,7 +148,7 @@ MEM.SCAN user:123 0 COUNT 100 FILTER type EQ preference
         lang="resp"
         filename="klyro"
         code={`MEM.QUERY user:123 TEXT "what database do they prefer?" \\
-  FVEC 384 0.02 0.41 ... TOPK 5 \\
+  FVEC 3 0.10 0.79 0.46 TOPK 5 \\
   WEIGHTS 0.3 0.55 0.1 0.05 FUSION LINEAR \\
   FILTER type EQ preference FILTER @importance GTE 0.5 \\
   WITHSCORES WITHMETA`}

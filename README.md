@@ -165,13 +165,13 @@ npm run dev        # http://localhost:3000
 The home page explains what Klyro is and who it is for; `/docs` carries the
 quickstart, the memory concepts, the full command reference, the
 configuration surface, and the client integration notes. See
-[frontend/README.md](frontend/README.md) for the folder structure and for
-which parts are still placeholders (the SDK package names, principally).
+[frontend/README.md](frontend/README.md) for the folder structure and editing
+notes.
 
 ## Talk to it
 
-Any Redis client library works. There is no Klyro-specific client to
-install:
+Any Redis client library works. Typed Klyro clients are also available for
+TypeScript/JavaScript, Python, and Go:
 
 ```python
 import redis

@@ -1,23 +1,15 @@
-/**
- * Single source of truth for product copy that appears in more than one
- * place. Placeholder URLs are marked so they are easy to find and swap
- * once the real endpoints exist.
- */
+/** Single source of truth for product copy used in more than one place. */
 export const site = {
   name: "Klyro",
   tagline: "A fast in-memory database with a familiar Redis interface",
   description:
     "Klyro is an in-memory database for strings, lists, hashes, sets, sorted sets, queues, pub/sub, transactions, and ranked text and vector search. It speaks RESP, so existing Redis clients can connect directly.",
-  url: "https://klyro.dev", // placeholder
+  url: "https://github.com/Hitesh-s0lanki/klyro",
   repo: "https://github.com/Hitesh-s0lanki/klyro",
   docker: "ghcr.io/hitesh-s0lanki/klyro:latest",
   defaultPort: 7171,
-  social: {
-    x: "https://x.com/klyrodb", // placeholder
-    discord: "https://discord.gg/klyro", // placeholder
-    npm: "https://www.npmjs.com/package/klyro-db",
-    pypi: "https://pypi.org/project/klyro-db/",
-  },
+  npm: "https://www.npmjs.com/package/klyro-db",
+  pypi: "https://pypi.org/project/klyro-db/",
 } as const;
 
 export const primaryNav = [

@@ -2,6 +2,83 @@ import type { Metadata } from "next";
 import { DocHeader } from "@/components/docs/DocHeader";
 import { Callout } from "@/components/docs/Callout";
 import { RefTable } from "@/components/docs/Table";
+import { CodeTabs, type CodeTab } from "@/components/ui/CodeTabs";
+
+const examples: Record<string, CodeTab[]> = {
+  generic: [
+    { label: "TypeScript", lang: "ts", code: `const exists = await db.exists("session:42");
+await db.expire("session:42", 900);
+const ttl = await db.ttl("session:42");` },
+    { label: "Python", lang: "python", code: `exists = db.exists("session:42")
+db.expire("session:42", 900)
+ttl = db.ttl("session:42")` },
+    { label: "Go", lang: "go", code: `exists, err := db.Exists(ctx, "session:42").Result()
+if err != nil { log.Fatal(err) }
+if err := db.Expire(ctx, "session:42", 15*time.Minute).Err(); err != nil { log.Fatal(err) }
+ttl, err := db.TTL(ctx, "session:42").Result()` },
+    { label: "redis-cli", lang: "resp", code: `EXISTS session:42
+EXPIRE session:42 900
+TTL session:42` },
+  ],
+  strings: [
+    { label: "TypeScript", lang: "ts", code: `await db.set("session:42", "active", "EX", 900);
+await db.incr("metrics:requests");
+const status = await db.get("session:42");` },
+    { label: "Python", lang: "python", code: `db.set("session:42", "active", ex=900)
+db.incr("metrics:requests")
+status = db.get("session:42")` },
+    { label: "Go", lang: "go", code: `if err := db.Set(ctx, "session:42", "active", 15*time.Minute).Err(); err != nil { log.Fatal(err) }
+requests, err := db.Incr(ctx, "metrics:requests").Result()
+status, err := db.Get(ctx, "session:42").Result()` },
+    { label: "redis-cli", lang: "resp", code: `SET session:42 active EX 900
+INCR metrics:requests
+GET session:42` },
+  ],
+  lists: [
+    { label: "TypeScript", lang: "ts", code: `await db.lpush("jobs", "generate-report");
+const job = await db.brpop("jobs", 5);` },
+    { label: "Python", lang: "python", code: `db.lpush("jobs", "generate-report")
+job = db.brpop("jobs", timeout=5)` },
+    { label: "Go", lang: "go", code: `if err := db.LPush(ctx, "jobs", "generate-report").Err(); err != nil { log.Fatal(err) }
+job, err := db.BRPop(ctx, 5*time.Second, "jobs").Result()` },
+    { label: "redis-cli", lang: "resp", code: `LPUSH jobs generate-report
+BRPOP jobs 5` },
+  ],
+  hashes: [
+    { label: "TypeScript", lang: "ts", code: `await db.hset("user:42", { name: "Ari", plan: "pro" });
+const profile = await db.hgetall("user:42");` },
+    { label: "Python", lang: "python", code: `db.hset("user:42", mapping={"name": "Ari", "plan": "pro"})
+profile = db.hgetall("user:42")` },
+    { label: "Go", lang: "go", code: `if err := db.HSet(ctx, "user:42", "name", "Ari", "plan", "pro").Err(); err != nil { log.Fatal(err) }
+profile, err := db.HGetAll(ctx, "user:42").Result()` },
+    { label: "redis-cli", lang: "resp", code: `HSET user:42 name Ari plan pro
+HGETALL user:42` },
+  ],
+  sets: [
+    { label: "TypeScript", lang: "ts", code: `await db.sadd("online-users", "42", "73");
+const online = await db.sismember("online-users", "42");
+const users = await db.smembers("online-users");` },
+    { label: "Python", lang: "python", code: `db.sadd("online-users", "42", "73")
+online = db.sismember("online-users", "42")
+users = db.smembers("online-users")` },
+    { label: "Go", lang: "go", code: `if err := db.SAdd(ctx, "online-users", "42", "73").Err(); err != nil { log.Fatal(err) }
+online, err := db.SIsMember(ctx, "online-users", "42").Result()
+users, err := db.SMembers(ctx, "online-users").Result()` },
+    { label: "redis-cli", lang: "resp", code: `SADD online-users 42 73
+SISMEMBER online-users 42
+SMEMBERS online-users` },
+  ],
+  zsets: [
+    { label: "TypeScript", lang: "ts", code: `await db.zadd("leaderboard", 980, "user:42", 860, "user:73");
+const leaders = await db.zrevrange("leaderboard", 0, 9, "WITHSCORES");` },
+    { label: "Python", lang: "python", code: `db.zadd("leaderboard", {"user:42": 980, "user:73": 860})
+leaders = db.zrevrange("leaderboard", 0, 9, withscores=True)` },
+    { label: "Go", lang: "go", code: `if err := db.ZAdd(ctx, "leaderboard", redis.Z{Score: 980, Member: "user:42"}, redis.Z{Score: 860, Member: "user:73"}).Err(); err != nil { log.Fatal(err) }
+leaders, err := db.ZRevRangeWithScores(ctx, "leaderboard", 0, 9).Result()` },
+    { label: "redis-cli", lang: "resp", code: `ZADD leaderboard 980 user:42 860 user:73
+ZREVRANGE leaderboard 0 9 WITHSCORES` },
+  ],
+};
 
 export const metadata: Metadata = {
   title: "Data type commands",
@@ -17,7 +94,39 @@ export default function DataTypesPage() {
         lead="Klyro implements 145 commands: 130 Redis-shaped commands plus the 15-command MEM.* family. Matching RESP reply shapes let standard client libraries decode the results."
       />
 
+      <p>
+        Choose a language once and every tabbed example in the documentation
+        follows that choice. The preference is stored only in this browser.
+      </p>
+      <CodeTabs
+        className="my-6"
+        tabs={[
+          { label: "TypeScript", lang: "ts", code: `import { createClient } from "klyro-db";
+
+const db = createClient();
+// Run commands, then close with: await db.quit();` },
+          { label: "Python", lang: "python", code: `from klyro_db import Klyro
+
+db = Klyro()
+# Run commands, then close with: db.close()` },
+          { label: "Go", lang: "go", code: `import (
+  "context"
+  "log"
+  "time"
+
+  klyro "github.com/Hitesh-s0lanki/klyro/go"
+  "github.com/redis/go-redis/v9"
+)
+
+ctx := context.Background()
+db := klyro.NewClient(nil)
+defer db.Close()` },
+          { label: "redis-cli", lang: "bash", code: `redis-cli -p 7171` },
+        ]}
+      />
+
       <h2 id="generic">Generic (any type)</h2>
+      <CodeTabs tabs={examples.generic} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
@@ -53,6 +162,7 @@ export default function DataTypesPage() {
       </p>
 
       <h2 id="strings">Strings</h2>
+      <CodeTabs tabs={examples.strings} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
@@ -86,6 +196,7 @@ export default function DataTypesPage() {
       </Callout>
 
       <h2 id="lists">Lists</h2>
+      <CodeTabs tabs={examples.lists} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
@@ -105,6 +216,7 @@ export default function DataTypesPage() {
       />
 
       <h2 id="hashes">Hashes</h2>
+      <CodeTabs tabs={examples.hashes} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
@@ -123,6 +235,7 @@ export default function DataTypesPage() {
       />
 
       <h2 id="sets">Sets</h2>
+      <CodeTabs tabs={examples.sets} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
@@ -145,6 +258,7 @@ export default function DataTypesPage() {
       </p>
 
       <h2 id="sorted-sets">Sorted sets</h2>
+      <CodeTabs tabs={examples.zsets} className="my-6" />
       <RefTable
         head={["Command", "Reply"]}
         rows={[
