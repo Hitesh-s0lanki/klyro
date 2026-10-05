@@ -10,6 +10,7 @@ export function Logo({ className, href = "/" }: { className?: string; href?: str
         alt="Klyro"
         width={1969}
         height={799}
+        sizes="89px"
         priority
         className="h-9 w-auto object-contain transition-transform group-hover:scale-[1.02]"
       />
