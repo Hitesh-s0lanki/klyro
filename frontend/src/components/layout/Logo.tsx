@@ -6,10 +6,11 @@ export function Logo({ className, href = "/" }: { className?: string; href?: str
   return (
     <Link href={href} className={cn("group inline-flex items-center gap-2.5", className)}>
       <Image
-        src="/logos/brand/kylro-logo.png"
-        alt="Kylro"
-        width={224}
-        height={92}
+        src="/logos/brand/klyro-logo.png"
+        alt="Klyro"
+        width={1969}
+        height={799}
+        sizes="89px"
         priority
         className="h-9 w-auto object-contain transition-transform group-hover:scale-[1.02]"
       />
