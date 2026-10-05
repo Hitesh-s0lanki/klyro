@@ -441,7 +441,7 @@ mod tests {
         let mut old = record("old", 0.9);
         old.updated_at = now - Duration::from_secs(7200);
         let fresh = record("fresh", 0.1);
-        let records = vec![old, fresh];
+        let records = [old, fresh];
         let hits = fuse(
             vec![(b"old".to_vec(), 1.0), (b"fresh".to_vec(), 1.0)],
             Vec::new(),

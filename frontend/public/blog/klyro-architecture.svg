@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Klyro architecture overview</title>
+  <desc id="desc">Redis clients connect over RESP to Klyro, which provides core data types, coordination features, memory indexes, and snapshot persistence.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset="1" stop-color="#111533"/></linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="9" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#67e8f9"/></marker>
+  </defs>
+  <rect width="1600" height="900" rx="32" fill="url(#bg)"/>
+  <text x="96" y="105" fill="#f8fafc" font-family="Inter,Arial,sans-serif" font-weight="700" font-size="50">One endpoint. Two kinds of retrieval.</text>
+  <text x="96" y="155" fill="#94a3b8" font-family="Inter,Arial,sans-serif" font-size="25">Familiar application state and ranked search share Klyro's keyspace and persistence path.</text>
+  <g font-family="Inter,Arial,sans-serif">
+    <rect x="85" y="305" width="300" height="292" rx="24" fill="#0f2035" stroke="#28405b" stroke-width="2"/>
+    <text x="125" y="365" fill="#e2e8f0" font-size="28" font-weight="700">Existing clients</text>
+    <text x="125" y="423" fill="#a5f3fc" font-size="24">redis-cli</text>
+    <text x="125" y="471" fill="#a5f3fc" font-size="24">redis-py</text>
+    <text x="125" y="519" fill="#a5f3fc" font-size="24">ioredis / go-redis</text>
+    <path d="M390 451 H555" stroke="#67e8f9" stroke-width="5" marker-end="url(#arrow)"/>
+    <text x="430" y="427" fill="#94a3b8" font-size="21">RESP2 / RESP3</text>
+    <rect x="575" y="235" width="450" height="430" rx="34" fill="#0b1830" stroke="url(#brand)" stroke-width="5" filter="url(#glow)"/>
+    <text x="650" y="330" fill="#f8fafc" font-size="60" font-weight="800">Klyro</text>
+    <text x="650" y="375" fill="#93c5fd" font-size="24">Rust in-memory database</text>
+    <rect x="635" y="425" width="330" height="72" rx="16" fill="#132a46"/>
+    <text x="670" y="470" fill="#e2e8f0" font-size="24">Keys, types, expiry</text>
+    <rect x="635" y="515" width="330" height="72" rx="16" fill="#132a46"/>
+    <text x="670" y="560" fill="#e2e8f0" font-size="24">Transactions, queues, pub/sub</text>
+    <path d="M1025 366 H1165" stroke="#67e8f9" stroke-width="5" marker-end="url(#arrow)"/>
+    <path d="M1025 545 H1165" stroke="#a78bfa" stroke-width="5" marker-end="url(#arrow)"/>
+    <rect x="1185" y="250" width="330" height="225" rx="24" fill="#0f2035" stroke="#2563eb" stroke-width="2"/>
+    <text x="1225" y="310" fill="#e2e8f0" font-size="28" font-weight="700">Core database</text>
+    <text x="1225" y="365" fill="#bfdbfe" font-size="23">Strings · Lists · Hashes</text>
+    <text x="1225" y="407" fill="#bfdbfe" font-size="23">Sets · Sorted sets</text>
+    <rect x="1185" y="505" width="330" height="225" rx="24" fill="#17162f" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="1225" y="565" fill="#e2e8f0" font-size="28" font-weight="700">Memory indexes</text>
+    <text x="1225" y="620" fill="#ddd6fe" font-size="23">BM25 · Vector · Hybrid</text>
+    <text x="1225" y="662" fill="#ddd6fe" font-size="23">Filters · Recency · Importance</text>
+    <path d="M800 665 V765" stroke="#67e8f9" stroke-width="5" marker-end="url(#arrow)"/>
+    <rect x="575" y="785" width="450" height="72" rx="18" fill="#10253b" stroke="#22d3ee" stroke-width="2"/>
+    <text x="670" y="831" fill="#cffafe" font-size="24">Shared atomic snapshot persistence</text>
+  </g>
+</svg>

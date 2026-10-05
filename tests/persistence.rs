@@ -155,6 +155,20 @@ fn a_version_1_dump_still_loads() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn a_file_that_is_not_a_dump_is_ignored() {
+    let path = std::env::temp_dir().join(format!("klyro_junk_{}.dump", std::process::id()));
+    std::fs::write(&path, "this is not a dump file\n").unwrap();
+
+    let mut server = KlyroServer::with_dump(0, path.clone());
+    {
+        let mut client = server.connect();
+        assert_eq!(client.send("DBSIZE"), int(0));
+    }
+    server.kill();
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Reads INFO's unsaved-change counter.
 fn changes(client: &mut common::KlyroClient) -> i64 {
     client
@@ -257,15 +271,44 @@ fn a_collection_edit_survives_a_restart() {
 }
 
 #[test]
-fn a_file_that_is_not_a_dump_is_ignored() {
-    let path = std::env::temp_dir().join(format!("klyro_junk_{}.dump", std::process::id()));
-    std::fs::write(&path, "this is not a dump file\n").unwrap();
-
-    let mut server = KlyroServer::with_dump(0, path.clone());
-    {
-        let mut client = server.connect();
-        assert_eq!(client.send("DBSIZE"), int(0));
+fn collection_edits_are_autosaved_before_an_abrupt_restart() {
+    let mut server = KlyroServer::with_config("save-interval 1");
+    let mut client = server.connect();
+    for command in [
+        "RPUSH l a b c d",
+        "HSET h keep v drop v",
+        "SADD s keep drop",
+        "ZADD z 1 keep 2 drop",
+    ] {
+        assert!(!client.send(command).is_error());
     }
-    server.kill();
-    let _ = std::fs::remove_file(&path);
+    assert_eq!(client.send("SAVE"), ok());
+    for command in [
+        "LPOP l",
+        "LSET l 0 changed",
+        "LTRIM l 0 1",
+        "HDEL h drop",
+        "SREM s drop",
+        "ZREM z drop",
+    ] {
+        assert!(!client.send(command).is_error());
+    }
+    assert!(changes(&mut client) > 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while changes(&mut client) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "autosave did not persist collection edits"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    server.kill(); // no SHUTDOWN save to hide an autosave regression
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    let mut client = reloaded.connect();
+    assert_eq!(client.send("LRANGE l 0 -1").list(), vec!["changed", "c"]);
+    assert_eq!(client.send("HKEYS h").list(), vec!["keep"]);
+    assert_eq!(client.send("SMEMBERS s").list(), vec!["keep"]);
+    assert_eq!(client.send("ZRANGE z 0 -1").list(), vec!["keep"]);
+    reloaded.kill();
+    reloaded.cleanup_dump();
 }

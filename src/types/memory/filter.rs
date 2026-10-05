@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn numbers_compare_numerically_not_lexically() {
         // As bytes, "42" sorts after "100"; as numbers it does not.
-        assert!(matches(b"score", "GT", b"100") == false);
+        assert!(!matches(b"score", "GT", b"100"));
         assert!(matches(b"score", "LT", b"100"));
         assert!(matches(b"score", "GTE", b"42"));
     }

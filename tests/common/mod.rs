@@ -13,7 +13,6 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 fn remove_if_exists(path: &std::path::Path) {
@@ -26,22 +25,13 @@ fn remove_if_exists(path: &std::path::Path) {
 // threads - two tests can grab the same just-freed port before either
 // child binds it. A shared counter hands out unique ports
 // deterministically.
-//
-// The base is derived from the process id, so two test binaries running
-// at once - `cargo test` in two worktrees, say - walk disjoint ranges
-// instead of fighting over the same ports. The retry below covers
-// whatever is left.
-static NEXT_PORT: OnceLock<AtomicU16> = OnceLock::new();
+static NEXT_PORT: AtomicU16 = AtomicU16::new(17300);
 
 /// How many ports a server tries before giving up.
 const ATTEMPTS: usize = 8;
 
 fn free_port() -> u16 {
-    let counter = NEXT_PORT.get_or_init(|| {
-        let slot = (std::process::id() % 200) as u16;
-        AtomicU16::new(20_000 + slot * 200)
-    });
-    counter.fetch_add(1, Ordering::Relaxed)
+    NEXT_PORT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A parsed RESP reply.
@@ -220,6 +210,50 @@ impl KlyroClient {
         self.stream.write_all(raw).expect("write");
     }
 
+    /// Sends a command without reading its reply - for a blocking
+    /// command, whose answer only arrives once another client acts.
+    pub fn send_only(&mut self, args: &[&str]) {
+        let owned: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+        let mut request = Vec::new();
+        request.extend_from_slice(format!("*{}\r\n", owned.len()).as_bytes());
+        for arg in &owned {
+            request.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            request.extend_from_slice(arg);
+            request.extend_from_slice(b"\r\n");
+        }
+        self.stream.write_all(&request).expect("write");
+    }
+
+    /// Reads one frame that is already on its way: the answer to a
+    /// blocking command, or a pushed pub/sub message.
+    pub fn read(&mut self) -> Value {
+        self.read_value()
+    }
+
+    /// Whether nothing arrives within `within`. Used to assert that a
+    /// blocking command really is blocked, and that a message did not
+    /// reach a client it was not addressed to.
+    pub fn quiet_for(&mut self, within: Duration) -> bool {
+        if parse(&self.buffer).is_some() {
+            return false;
+        }
+        self.stream.set_read_timeout(Some(within)).unwrap();
+        let mut chunk = [0u8; 4096];
+        let quiet = match self.stream.read(&mut chunk) {
+            // A closed connection is not silence: something happened.
+            Ok(0) => false,
+            Ok(n) => {
+                self.buffer.extend_from_slice(&chunk[..n]);
+                false
+            }
+            Err(_) => true,
+        };
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        quiet
+    }
+
     /// Whether the server has closed this connection.
     pub fn closed(&mut self) -> bool {
         let mut chunk = [0u8; 64];
@@ -272,9 +306,10 @@ fn parse(buf: &[u8]) -> Option<(Value, usize)> {
                 after + len + 2,
             ))
         }
-        // RESP3 maps and sets arrive here too; both are read as a
-        // flat array of their elements, which is all these tests need.
-        b'*' | b'~' | b'%' => {
+        // RESP3 maps, sets, and pushes arrive here too; all three are
+        // read as a flat array of their elements, which is all these
+        // tests need.
+        b'*' | b'~' | b'%' | b'>' => {
             let mut count: i64 = text.trim().parse().ok()?;
             if count < 0 {
                 return Some((Value::NilArray, after));

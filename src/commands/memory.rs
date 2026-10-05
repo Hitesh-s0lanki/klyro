@@ -524,7 +524,7 @@ fn config(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     if let Some(half_life) = half_life {
         memory.set_half_life(half_life);
     }
-    app.store.mark_dirty(&argv[1]);
+    app.store.mark_dirty();
     Ok(Reply::ok())
 }
 
@@ -591,7 +591,7 @@ fn add(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.add(request, max_terms, max_records) {
         Ok(id) => {
-            app.store.mark_dirty(&argv[1]);
+            app.store.mark_dirty();
             Ok(Reply::Bulk(id))
         }
         Err(e) => Err(describe(e)),
@@ -644,7 +644,7 @@ fn del(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
         .iter()
         .filter(|id| memory.del(id, max_terms))
         .count();
-    app.store.mark_dirty(&argv[1]);
+    app.store.mark_dirty();
     Ok(Reply::Integer(removed as i64))
 }
 
@@ -660,7 +660,7 @@ fn set_meta(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.set_meta(&argv[2], pairs) {
         Ok(added) => {
-            app.store.mark_dirty(&argv[1]);
+            app.store.mark_dirty();
             Ok(Reply::Integer(added as i64))
         }
         Err(e) => Err(describe(e)),
@@ -673,7 +673,7 @@ fn del_meta(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.remove_meta(&argv[2], &fields) {
         Ok(removed) => {
-            app.store.mark_dirty(&argv[1]);
+            app.store.mark_dirty();
             Ok(Reply::Integer(removed as i64))
         }
         Err(e) => Err(describe(e)),
@@ -692,7 +692,7 @@ fn expire(app: &mut App, argv: &[Bytes]) -> Checked<Reply> {
     let memory = index(app, &argv[1])?;
     match memory.set_record_ttl(&argv[2], ttl) {
         Ok(()) => {
-            app.store.mark_dirty(&argv[1]);
+            app.store.mark_dirty();
             Ok(Reply::bool(true))
         }
         Err(MemoryError::NoSuchRecord) => Ok(Reply::bool(false)),

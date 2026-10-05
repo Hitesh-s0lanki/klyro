@@ -52,6 +52,9 @@ broken.conf:
 | `client-output-buffer-limit` | `268435456` | yes | Unsent reply allowed to pile up before the connection is closed |
 | `scan-default-count` | `10` | yes | The `COUNT` a `SCAN` uses when not given one |
 | `zadd-max-pairs` | `128` | yes | Most score/member pairs in one `ZADD` |
+| `maxmemory` | `0` | yes | Bytes the process may hold; `0` is no limit |
+| `maxmemory-policy` | `noeviction` | yes | Which key to drop at the limit |
+| `maxmemory-samples` | `5` | yes | Keys sampled per eviction round |
 
 `bind` and `port` are fixed because the listening socket is already
 bound by the time a client could ask; `CONFIG SET` on either replies
@@ -102,7 +105,6 @@ uptime_in_days:0
 connected_clients:1
 maxclients:10000
 rejected_connections:0
-watched_keys:0
 
 # Memory
 used_memory:5235
@@ -148,7 +150,7 @@ connection buffers included, not the keyspace alone.
 [../src/commands/mod.rs](../src/commands/mod.rs) and nothing else, so a
 write's internal lookup never lands in the ratio. The dispatcher measures
 the delta in the store's lookup counters across a single command, which
-keeps the accounting in one place instead of spread across 117 handlers.
+keeps the accounting in one place instead of spread across 107 handlers.
 Internal type checks deliberately use a non-counting lookup, otherwise
 every read would register as two.
 
@@ -156,11 +158,6 @@ every read would register as two.
 command availability on it, so INFO reports the Redis release whose
 command shapes Klyro implements. It is not a claim to be that server;
 `klyro_version` sits right above it.
-
-**`watched_keys` counts keys, not clients.** It is the size of the
-WATCH registry in `store.rs`, so it goes to zero once every watching
-connection has run `EXEC`, `DISCARD`, `UNWATCH`, or disconnected. See
-[transactions.md](transactions.md).
 
 **The keyspace section is the one O(n) part of INFO.** It walks the
 keyspace to count keys, keys with a TTL, and the per-type breakdown.
@@ -189,12 +186,16 @@ $ nc localhost 7171
 a reply that outgrows it ends the connection with an error, which is
 what replaced the old protocol's silent 64 KiB truncation.
 
+`maxmemory` is the only parameter that accepts a size suffix, because it
+is the only one people write by hand: `k`/`m`/`g` are powers of a
+thousand and `kb`/`mb`/`gb` powers of 1024, as in Redis. `CONFIG GET`
+always answers in bytes. It and `maxmemory-policy` are covered on their
+own in [eviction.md](eviction.md).
+
 ## What is still missing
 
 - No `CONFIG REWRITE`, so a runtime change is not written back to the
   config file and does not survive a restart.
-- No `maxmemory` and no eviction policy. `INFO memory` reports usage, but
-  nothing acts on it.
 - No `CLIENT LIST`/`CLIENT KILL`, no `SLOWLOG`, no `LATENCY`, no
   `COMMAND`, no `MONITOR`, and no per-command statistics.
 - No logging beyond the startup and shutdown lines, and no `loglevel`.

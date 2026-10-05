@@ -34,6 +34,13 @@ pub fn next_u64() -> u64 {
     })
 }
 
+/// A uniform-enough value in `[0, 1)`, for the LFU counter's
+/// probabilistic increment. Built from the top 53 bits, which is every
+/// bit an `f64` can hold without rounding.
+pub fn unit_interval() -> f64 {
+    (next_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// A uniform-enough value in `0..n`. Returns 0 when `n` is 0.
 pub fn below(n: usize) -> usize {
     if n == 0 {
@@ -61,5 +68,19 @@ mod tests {
     #[test]
     fn below_zero_is_zero() {
         assert_eq!(below(0), 0);
+    }
+
+    #[test]
+    fn unit_interval_stays_in_range_and_spreads() {
+        let mut sum = 0.0;
+        for _ in 0..1000 {
+            let v = unit_interval();
+            assert!((0.0..1.0).contains(&v), "{v} left [0, 1)");
+            sum += v;
+        }
+        // A wide band: this asserts the generator is not stuck near an
+        // end, not that it passes a randomness test.
+        let mean = sum / 1000.0;
+        assert!((0.4..0.6).contains(&mean), "mean was {mean}");
     }
 }

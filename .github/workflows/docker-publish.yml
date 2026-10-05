@@ -30,8 +30,13 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Read the version and build the image name
+      - name: Read the version and build the image names
         id: version
+        env:
+          # Set this repository variable to publish to Docker Hub as
+          # well. Left unset - in a fork, say - the run stays ghcr-only
+          # instead of failing on credentials it does not have.
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
         run: |
           set -euo pipefail
           version=$(awk -F'"' '
@@ -46,15 +51,30 @@ jobs:
 
           # Registries reject uppercase in an image path, and this
           # repository's owner has one.
-          image="$REGISTRY/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          ghcr="$REGISTRY/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+
+          # Docker Hub takes no registry prefix: an unprefixed
+          # namespace/name is what docker.io means by default.
+          hub=""
+          if [ -n "${DOCKERHUB_NAMESPACE:-}" ]; then
+              lower=$(printf '%s' "$DOCKERHUB_NAMESPACE" | tr '[:upper:]' '[:lower:]')
+              hub="$lower/klyro"
+          fi
 
           {
               echo "version=$version"
               echo "minor=${version%.*}"
-              echo "image=$image"
+              # One image per line, so the heredoc form rather than
+              # key=value. metadata-action applies every tag to each.
+              echo "images<<IMAGES_EOF"
+              echo "$ghcr"
+              if [ -n "$hub" ]; then
+                  echo "$hub"
+              fi
+              echo "IMAGES_EOF"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Publishing $image:$version"
+          echo "Publishing $version to $ghcr${hub:+ and $hub}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -69,11 +89,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker Hub needs real credentials, unlike ghcr: DOCKERHUB_TOKEN
+      # should be an access token from Docker Hub's security settings,
+      # not the account password. DOCKERHUB_USERNAME is the account that
+      # owns the token, which is not always the namespace being pushed
+      # to - an organisation is pushed to by one of its members.
+      - name: Log in to Docker Hub
+        if: vars.DOCKERHUB_NAMESPACE != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Work out the tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.version.outputs.image }}
+          images: ${{ steps.version.outputs.images }}
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=${{ steps.version.outputs.minor }}
