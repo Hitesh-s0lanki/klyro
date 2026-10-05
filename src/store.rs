@@ -771,12 +771,12 @@ impl Store {
     }
 }
 
-/// Defines `get_or_create_<field>`/`get_existing_<field>` pairs.
-/// "get_or_create" makes a new empty collection if the key is absent;
-/// "get_existing" never creates. Both return `None` if the key holds a
-/// different type.
+/// Collection accessors declare read or write intent. Reads return an
+/// immutable reference; writes mark an existing collection dirty so
+/// autosave notices edits even when the collection remains non-empty.
+/// Only get_or_create creates missing collections.
 macro_rules! define_collection_accessors {
-    ($get_or_create:ident, $get_existing:ident, $variant:ident, $ty:ty, $default:expr) => {
+    ($get_or_create:ident, $read:ident, $write:ident, $variant:ident, $ty:ty, $default:expr) => {
         impl Store {
             pub fn $get_or_create(&mut self, key: &[u8]) -> Option<&mut $ty> {
                 self.dirty += 1; // every caller is about to mutate the result
@@ -797,13 +797,27 @@ macro_rules! define_collection_accessors {
                 }
             }
 
-            pub fn $get_existing(&mut self, key: &[u8]) -> Option<&mut $ty> {
-                match self.find_mut(key) {
-                    Some(e) => match &mut e.value {
+            pub fn $read(&mut self, key: &[u8]) -> Option<&$ty> {
+                match self.find(key) {
+                    Some(e) => match &e.value {
                         Value::$variant(v) => Some(v),
                         _ => None,
                     },
                     None => None,
+                }
+            }
+
+            pub fn $write(&mut self, key: &[u8]) -> Option<&mut $ty> {
+                if !self
+                    .find(key)
+                    .is_some_and(|e| matches!(e.value, Value::$variant(_)))
+                {
+                    return None;
+                }
+                self.dirty += 1;
+                match &mut self.map.get_mut(key).unwrap().value {
+                    Value::$variant(v) => Some(v),
+                    _ => unreachable!(),
                 }
             }
         }
@@ -812,22 +826,25 @@ macro_rules! define_collection_accessors {
 
 define_collection_accessors!(
     get_or_create_list,
-    get_existing_list,
+    read_list,
+    write_list,
     List,
     List,
     List::new()
 );
 define_collection_accessors!(
     get_or_create_hash,
-    get_existing_hash,
+    read_hash,
+    write_hash,
     Hash,
     Hash,
     Hash::new()
 );
-define_collection_accessors!(get_or_create_set, get_existing_set, Set, Set, Set::new());
+define_collection_accessors!(get_or_create_set, read_set, write_set, Set, Set, Set::new());
 define_collection_accessors!(
     get_or_create_zset,
-    get_existing_zset,
+    read_zset,
+    write_zset,
     Zset,
     Zset,
     Zset::new()

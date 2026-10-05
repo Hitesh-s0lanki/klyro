@@ -221,3 +221,31 @@ fn a_watching_client_that_leaves_frees_its_watch() {
     client.send("SET k v");
     assert_eq!(client.send("EXEC"), array(vec![ok()]));
 }
+
+#[test]
+fn memory_writes_invalidate_watch_and_reads_preserve_it_in_both_protocols() {
+    for protocol in [2, 3] {
+        let server = KlyroServer::new();
+        let (mut client, mut other) = (server.connect(), server.connect());
+        client.send(&format!("HELLO {protocol}"));
+        other.send(&format!("HELLO {protocol}"));
+        assert_eq!(client.send("MEM.CREATE ns MODE SEARCH"), ok());
+        client.send("WATCH ns");
+        assert!(!other.send("MEM.ADD ns ID d1 TEXT hello").is_error());
+        client.send("MULTI");
+        client.send("SET sentinel should-not-run");
+        assert!(matches!(client.send("EXEC"), Value::NilArray | Value::Nil));
+        assert_eq!(other.send("EXISTS sentinel"), int(0));
+        client.send("WATCH ns");
+        for command in ["MEM.GET ns d1", "MEM.CARD ns", "MEM.SEARCH ns hello"] {
+            assert!(!other.send(command).is_error());
+        }
+        client.send("MULTI");
+        assert_eq!(
+            client.send("MEM.ADD ns ID d2 TEXT world"),
+            Value::Simple("QUEUED".into())
+        );
+        assert_eq!(client.send("EXEC").items().len(), 1);
+        assert_eq!(other.send("MEM.CARD ns"), int(2));
+    }
+}

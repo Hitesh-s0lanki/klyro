@@ -54,7 +54,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let score = app
                 .store
-                .get_existing_zset(&argv[1])
+                .read_zset(&argv[1])
                 .and_then(|z| z.score(&argv[2]));
             Ok(score.map_or(Reply::Nil, Reply::Double))
         }
@@ -62,7 +62,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "ZMSCORE" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Zset)?;
-            let zset = app.store.get_existing_zset(&argv[1]).cloned();
+            let zset = app.store.read_zset(&argv[1]).cloned();
             Ok(Reply::array(
                 argv[2..]
                     .iter()
@@ -86,7 +86,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             if !updated.is_finite() {
                 // Undo, so a NaN/inf score never reaches the keyspace.
                 app.store
-                    .get_existing_zset(&argv[1])
+                    .write_zset(&argv[1])
                     .expect("just created")
                     .rem(&argv[3]);
                 app.store.delete_if_empty(&argv[1]);
@@ -98,7 +98,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "ZREM" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Zset)?;
-            let removed = match app.store.get_existing_zset(&argv[1]) {
+            let removed = match app.store.write_zset(&argv[1]) {
                 Some(z) => argv[2..].iter().filter(|m| z.rem(m)).count(),
                 None => 0,
             };
@@ -109,17 +109,14 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "ZCARD" => {
             exact_args(argv, name, 1)?;
             check_type(app, &argv[1], StoreType::Zset)?;
-            let len = app
-                .store
-                .get_existing_zset(&argv[1])
-                .map_or(0, |z| z.size());
+            let len = app.store.read_zset(&argv[1]).map_or(0, |z| z.size());
             Ok(Reply::Integer(len as i64))
         }
 
         "ZRANK" | "ZREVRANK" => {
             exact_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Zset)?;
-            let rank = app.store.get_existing_zset(&argv[1]).and_then(|z| {
+            let rank = app.store.read_zset(&argv[1]).and_then(|z| {
                 if name == "ZRANK" {
                     z.rank(&argv[2])
                 } else {
@@ -136,7 +133,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let pairs = app
                 .store
-                .get_existing_zset(&argv[1])
+                .read_zset(&argv[1])
                 .map(|z| {
                     owned(if name == "ZRANGE" {
                         z.range(start, stop)
@@ -161,7 +158,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let mut pairs = app
                 .store
-                .get_existing_zset(&argv[1])
+                .read_zset(&argv[1])
                 .map(|z| owned(z.range_by_score(min, max)))
                 .unwrap_or_default();
             if reversed {
@@ -176,7 +173,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let count = app
                 .store
-                .get_existing_zset(&argv[1])
+                .read_zset(&argv[1])
                 .map_or(0, |z| z.count_by_score(min, max));
             Ok(Reply::Integer(count as i64))
         }
@@ -187,7 +184,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let removed = app
                 .store
-                .get_existing_zset(&argv[1])
+                .write_zset(&argv[1])
                 .map_or(0, |z| z.remove_range_by_score(min, max));
             app.store.delete_if_empty(&argv[1]);
             Ok(Reply::Integer(removed as i64))
@@ -199,7 +196,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let removed = app
                 .store
-                .get_existing_zset(&argv[1])
+                .write_zset(&argv[1])
                 .map_or(0, |z| z.remove_range_by_rank(start, stop));
             app.store.delete_if_empty(&argv[1]);
             Ok(Reply::Integer(removed as i64))
@@ -218,7 +215,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Zset)?;
             let mut popped = app
                 .store
-                .get_existing_zset(&argv[1])
+                .write_zset(&argv[1])
                 .map(|z| z.pop(count.unwrap_or(1), name == "ZPOPMAX"))
                 .unwrap_or_default();
             app.store.delete_if_empty(&argv[1]);

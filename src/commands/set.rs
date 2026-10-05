@@ -20,7 +20,7 @@ fn collect_sets(app: &mut App, keys: &[Bytes]) -> Checked<Vec<Set>> {
     }
     Ok(keys
         .iter()
-        .map(|key| app.store.get_existing_set(key).cloned().unwrap_or_default())
+        .map(|key| app.store.read_set(key).cloned().unwrap_or_default())
         .collect())
 }
 
@@ -71,7 +71,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "SREM" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Set)?;
-            let removed = match app.store.get_existing_set(&argv[1]) {
+            let removed = match app.store.write_set(&argv[1]) {
                 Some(s) => argv[2..].iter().filter(|m| s.remove(*m)).count(),
                 None => 0,
             };
@@ -84,7 +84,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Set)?;
             let present = app
                 .store
-                .get_existing_set(&argv[1])
+                .read_set(&argv[1])
                 .is_some_and(|s| s.contains(&argv[2]));
             Ok(Reply::bool(present))
         }
@@ -92,11 +92,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "SMISMEMBER" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Set)?;
-            let set = app
-                .store
-                .get_existing_set(&argv[1])
-                .cloned()
-                .unwrap_or_default();
+            let set = app.store.read_set(&argv[1]).cloned().unwrap_or_default();
             Ok(Reply::array(
                 argv[2..]
                     .iter()
@@ -108,7 +104,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "SCARD" => {
             exact_args(argv, name, 1)?;
             check_type(app, &argv[1], StoreType::Set)?;
-            let len = app.store.get_existing_set(&argv[1]).map_or(0, |s| s.len());
+            let len = app.store.read_set(&argv[1]).map_or(0, |s| s.len());
             Ok(Reply::Integer(len as i64))
         }
 
@@ -117,7 +113,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Set)?;
             let members: Vec<Bytes> = app
                 .store
-                .get_existing_set(&argv[1])
+                .read_set(&argv[1])
                 .map(|s| s.iter().cloned().collect())
                 .unwrap_or_default();
             Ok(Reply::Set(members.into_iter().map(Reply::bulk).collect()))
@@ -139,7 +135,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
                 let wanted = count.unwrap_or(1).max(0) as usize;
                 let taken = app
                     .store
-                    .get_existing_set(&argv[1])
+                    .write_set(&argv[1])
                     .map(|s| take_random(s, wanted))
                     .unwrap_or_default();
                 app.store.delete_if_empty(&argv[1]);
@@ -148,11 +144,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
                 // SRANDMEMBER with a negative count may repeat members,
                 // and always returns exactly that many when the set is
                 // non-empty - the same rule Redis uses.
-                let set = app
-                    .store
-                    .get_existing_set(&argv[1])
-                    .cloned()
-                    .unwrap_or_default();
+                let set = app.store.read_set(&argv[1]).cloned().unwrap_or_default();
                 match count {
                     Some(n) if n < 0 => {
                         let members: Vec<&Bytes> = set.iter().collect();
@@ -189,7 +181,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, destination, StoreType::Set)?;
             let removed = app
                 .store
-                .get_existing_set(source)
+                .write_set(source)
                 .is_some_and(|s| s.remove(member));
             if !removed {
                 return Ok(Reply::bool(false));

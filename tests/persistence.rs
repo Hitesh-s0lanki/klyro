@@ -168,3 +168,147 @@ fn a_file_that_is_not_a_dump_is_ignored() {
     server.kill();
     let _ = std::fs::remove_file(&path);
 }
+
+/// Reads INFO's unsaved-change counter.
+fn changes(client: &mut common::KlyroClient) -> i64 {
+    client
+        .send("INFO persistence")
+        .text()
+        .lines()
+        .find_map(|line| {
+            line.trim_end()
+                .strip_prefix("changes_since_last_save:")
+                .and_then(|n| n.parse().ok())
+        })
+        .expect("a changes_since_last_save line")
+}
+
+#[test]
+fn editing_a_collection_marks_the_store_unsaved() {
+    // Regression: mutations that left a collection non-empty used to
+    // slip past the dirty counter entirely, so the periodic autosave
+    // skipped them and the writes were lost on a crash.
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("RPUSH l a b c");
+    client.send("HSET h f1 v f2 v");
+    client.send("SADD s m1 m2");
+    client.send("ZADD z 1 m1 2 m2");
+    client.send("SAVE");
+    assert_eq!(changes(&mut client), 0);
+
+    for command in [
+        "LPOP l",
+        "LSET l 0 changed",
+        "HDEL h f1",
+        "SREM s m1",
+        "ZREM z m1",
+    ] {
+        let before = changes(&mut client);
+        client.send(command);
+        assert!(
+            changes(&mut client) > before,
+            "{command} did not mark the store unsaved"
+        );
+    }
+    server.cleanup_dump();
+}
+
+#[test]
+fn reading_a_collection_does_not_mark_the_store_unsaved() {
+    let server = KlyroServer::new();
+    let mut client = server.connect();
+    client.send("RPUSH l a b c");
+    client.send("HSET h f v");
+    client.send("SADD s m");
+    client.send("ZADD z 1 m");
+    client.send("SAVE");
+
+    for command in [
+        "LRANGE l 0 -1",
+        "LINDEX l 0",
+        "LLEN l",
+        "HGETALL h",
+        "HGET h f",
+        "SMEMBERS s",
+        "SISMEMBER s m",
+        "ZRANGE z 0 -1",
+        "ZSCORE z m",
+        "GET nothing",
+    ] {
+        client.send(command);
+        assert_eq!(
+            changes(&mut client),
+            0,
+            "{command} marked the store unsaved"
+        );
+    }
+    server.cleanup_dump();
+}
+
+#[test]
+fn a_collection_edit_survives_a_restart() {
+    let mut server = KlyroServer::new();
+    {
+        let mut client = server.connect();
+        client.send("RPUSH l a b c");
+        client.send("HSET h keep v drop v");
+        client.send("SAVE");
+        // These used to be invisible to the next save.
+        client.send("LPOP l");
+        client.send("HDEL h drop");
+    }
+    server.shutdown();
+
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    {
+        let mut client = reloaded.connect();
+        assert_eq!(client.send("LRANGE l 0 -1").list(), vec!["b", "c"]);
+        assert_eq!(client.send("HKEYS h").list(), vec!["keep"]);
+    }
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}
+
+#[test]
+fn collection_edits_are_autosaved_before_an_abrupt_restart() {
+    let mut server = KlyroServer::with_config("save-interval 1");
+    let mut client = server.connect();
+    for command in [
+        "RPUSH l a b c d",
+        "HSET h keep v drop v",
+        "SADD s keep drop",
+        "ZADD z 1 keep 2 drop",
+    ] {
+        assert!(!client.send(command).is_error());
+    }
+    assert_eq!(client.send("SAVE"), ok());
+    for command in [
+        "LPOP l",
+        "LSET l 0 changed",
+        "LTRIM l 0 1",
+        "HDEL h drop",
+        "SREM s drop",
+        "ZREM z drop",
+    ] {
+        assert!(!client.send(command).is_error());
+    }
+    assert!(changes(&mut client) > 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while changes(&mut client) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "autosave did not persist collection edits"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    server.kill(); // no SHUTDOWN save to hide an autosave regression
+    let mut reloaded = KlyroServer::reload(server.dump_path.clone());
+    let mut client = reloaded.connect();
+    assert_eq!(client.send("LRANGE l 0 -1").list(), vec!["changed", "c"]);
+    assert_eq!(client.send("HKEYS h").list(), vec!["keep"]);
+    assert_eq!(client.send("SMEMBERS s").list(), vec!["keep"]);
+    assert_eq!(client.send("ZRANGE z 0 -1").list(), vec!["keep"]);
+    reloaded.kill();
+    reloaded.cleanup_dump();
+}

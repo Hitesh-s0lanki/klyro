@@ -162,3 +162,17 @@ friends, which exist for cluster routing Klyro has no equivalent of),
 keyspace notifications, and the `CLIENT` subcommands that reach into
 *other* connections (`LIST`, `KILL`) — Klyro's connections live in the
 event loop rather than in a registry the command layer can walk.
+
+## Collection durability
+
+Collection accessors separate read and write intent: `read_*` returns
+an immutable reference, while `write_*` marks an existing collection
+dirty before handing out a mutable reference. This ensures that
+`LPOP`, `LSET`, `LTRIM`, `HDEL`, `SREM`, and `ZREM` are autosaved even
+when they leave the collection non-empty. Shared blocking-pop helpers
+use the same write accessors. Persistence serialization uses read
+accessors and does not itself mark collections dirty.
+
+WATCH invalidation remains in the current command dispatcher and
+`watch.rs`, including the MEM.* key specifications; there is no second
+per-session or store-level watch registry.

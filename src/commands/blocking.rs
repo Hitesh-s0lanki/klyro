@@ -296,11 +296,10 @@ fn mpop_lists(app: &mut App, keys: &[Bytes], end: End, count: usize) -> Checked<
 fn pop_one_scored(app: &mut App, key: &[u8], edge: Edge, count: usize) -> Vec<(Bytes, f64)> {
     let popped = app
         .store
-        .get_existing_zset(key)
+        .write_zset(key)
         .map(|z| z.pop(count, edge == Edge::Max))
         .unwrap_or_default();
     if !popped.is_empty() {
-        app.store.mark_dirty();
         app.store.delete_if_empty(key);
     }
     popped

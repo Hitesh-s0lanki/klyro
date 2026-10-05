@@ -60,7 +60,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Hash)?;
             let value = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .and_then(|h| h.get(&argv[2]).cloned());
             Ok(value.map_or(Reply::Nil, Reply::Bulk))
         }
@@ -68,7 +68,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "HMGET" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Hash)?;
-            let hash = app.store.get_existing_hash(&argv[1]).cloned();
+            let hash = app.store.read_hash(&argv[1]).cloned();
             let values = argv[2..]
                 .iter()
                 .map(|field| match hash.as_ref().and_then(|h| h.get(field)) {
@@ -82,7 +82,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "HDEL" => {
             min_args(argv, name, 2)?;
             check_type(app, &argv[1], StoreType::Hash)?;
-            let removed = match app.store.get_existing_hash(&argv[1]) {
+            let removed = match app.store.write_hash(&argv[1]) {
                 Some(h) => argv[2..].iter().filter(|f| h.remove(*f).is_some()).count(),
                 None => 0,
             };
@@ -93,7 +93,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
         "HLEN" => {
             exact_args(argv, name, 1)?;
             check_type(app, &argv[1], StoreType::Hash)?;
-            let len = app.store.get_existing_hash(&argv[1]).map_or(0, |h| h.len());
+            let len = app.store.read_hash(&argv[1]).map_or(0, |h| h.len());
             Ok(Reply::Integer(len as i64))
         }
 
@@ -102,7 +102,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Hash)?;
             let present = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .is_some_and(|h| h.contains_key(&argv[2]));
             Ok(Reply::bool(present))
         }
@@ -112,7 +112,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Hash)?;
             let len = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .and_then(|h| h.get(&argv[2]).map(|v| v.len()))
                 .unwrap_or(0);
             Ok(Reply::Integer(len as i64))
@@ -124,7 +124,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             let wants_keys = name == "HKEYS";
             let items: Vec<Bytes> = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .map(|h| {
                     h.iter()
                         .map(|(f, v)| if wants_keys { f.clone() } else { v.clone() })
@@ -138,7 +138,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             exact_args(argv, name, 1)?;
             check_type(app, &argv[1], StoreType::Hash)?;
             let mut pairs = Vec::new();
-            if let Some(hash) = app.store.get_existing_hash(&argv[1]) {
+            if let Some(hash) = app.store.read_hash(&argv[1]) {
                 for (field, value) in hash.iter() {
                     pairs.push((Reply::bulk(field.clone()), Reply::bulk(value.clone())));
                 }
@@ -152,7 +152,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Hash)?;
             let current = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .and_then(|h| h.get(&argv[2]).cloned());
             let base = match current {
                 None => 0,
@@ -177,7 +177,7 @@ fn handle(app: &mut App, name: &str, argv: &[Bytes]) -> Checked<Reply> {
             check_type(app, &argv[1], StoreType::Hash)?;
             let current = app
                 .store
-                .get_existing_hash(&argv[1])
+                .read_hash(&argv[1])
                 .and_then(|h| h.get(&argv[2]).cloned());
             let base = match current {
                 None => 0.0,
